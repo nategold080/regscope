@@ -1,0 +1,106 @@
+[
+  {
+    "id": "TEST-COMMENT-001",
+    "attributes": {
+      "title": "Comment from John Doe",
+      "comment": "I strongly support this proposed rule. It will help protect public health and the environment.",
+      "firstName": "John",
+      "lastName": "Doe",
+      "organization": "",
+      "postedDate": "2023-06-15T00:00:00Z",
+      "lastModifiedDate": "2023-06-15T12:00:00Z",
+      "objectId": "TEST-DOC-001"
+    }
+  },
+  {
+    "id": "TEST-COMMENT-002",
+    "attributes": {
+      "title": "Comment from Jane Smith",
+      "comment": "I strongly support this proposed rule. It will help protect public health and the environment.",
+      "firstName": "Jane",
+      "lastName": "Smith",
+      "organization": "",
+      "postedDate": "2023-06-16T00:00:00Z",
+      "lastModifiedDate": "2023-06-16T12:00:00Z",
+      "objectId": "TEST-DOC-001"
+    }
+  },
+  {
+    "id": "TEST-COMMENT-003",
+    "attributes": {
+      "title": "Comment from Acme Corp",
+      "comment": "We oppose this proposed rule. The compliance costs outlined in the Regulatory Impact Analysis (85 Fed. Reg. 12345) significantly underestimate the impact on small refineries. According to our analysis under 42 U.S.C. § 7411, the proposed emission standards of 25 ppm would require capital expenditures exceeding $50 million per facility. We request that EPA consider a phased implementation schedule as permitted under Section 111(d) of the Clean Air Act.",
+      "firstName": "Robert",
+      "lastName": "Johnson",
+      "organization": "Acme Manufacturing Corp.",
+      "postedDate": "2023-06-17T00:00:00Z",
+      "lastModifiedDate": "2023-06-17T12:00:00Z",
+      "objectId": "TEST-DOC-001"
+    }
+  },
+  {
+    "id": "TEST-COMMENT-004",
+    "attributes": {
+      "title": "Comment from Environmental Defense Fund",
+      "comment": "The Environmental Defense Fund supports this proposed rule with modifications. While we agree with the overall goals, we recommend strengthening the monitoring requirements under 40 CFR Part 60 to include continuous emission monitoring systems (CEMS) for all affected facilities. Studies by the National Academy of Sciences (2022) demonstrate that self-reported data underestimates actual emissions by 40-60%. See also our detailed technical comments in the attached PDF.",
+      "firstName": "Sarah",
+      "lastName": "Williams",
+      "organization": "Environmental Defense Fund",
+      "postedDate": "2023-06-18T00:00:00Z",
+      "lastModifiedDate": "2023-06-18T12:00:00Z",
+      "objectId": "TEST-DOC-001"
+    }
+  },
+  {
+    "id": "TEST-COMMENT-005",
+    "attributes": {
+      "title": "Comment from American Petroleum Institute",
+      "comment": "The American Petroleum Institute opposes this rule but would accept it with the following changes: (1) extend the compliance deadline by 3 years; (2) exclude facilities producing less than 10,000 barrels per day; (3) allow emissions averaging across facilities within the same company.",
+      "firstName": "Michael",
+      "lastName": "Chen",
+      "organization": "American Petroleum Institute",
+      "postedDate": "2023-06-19T00:00:00Z",
+      "lastModifiedDate": "2023-06-19T12:00:00Z",
+      "objectId": "TEST-DOC-001"
+    }
+  },
+  {
+    "id": "TEST-COMMENT-006",
+    "attributes": {
+      "title": "Form letter - Sierra Club campaign",
+      "comment": "I strongly support this proposed rule. It will help protect public health and the environment.",
+      "firstName": "Alice",
+      "lastName": "Brown",
+      "organization": "",
+      "postedDate": "2023-06-20T00:00:00Z",
+      "lastModifiedDate": "2023-06-20T12:00:00Z",
+      "objectId": "TEST-DOC-001"
+    }
+  },
+  {
+    "id": "TEST-COMMENT-007",
+    "attributes": {
+      "title": "Form letter variant",
+      "comment": "I strongly support this proposed rule! It will help protect public health and the environment. Please finalize it as soon as possible.",
+      "firstName": "Bob",
+      "lastName": "Wilson",
+      "organization": "",
+      "postedDate": "2023-06-21T00:00:00Z",
+      "lastModifiedDate": "2023-06-21T12:00:00Z",
+      "objectId": "TEST-DOC-001"
+    }
+  },
+  {
+    "id": "TEST-COMMENT-008",
+    "attributes": {
+      "title": "State of California comment",
+      "comment": "The State of California, through the California Air Resources Board, provides the following technical information regarding the proposed rule. Our state-level implementation of similar emission standards (California Code of Regulations, Title 17, Section 95000 et seq.) has demonstrated that the proposed federal standards are technically achievable. Attached is our 50-page technical analysis.",
+      "firstName": "Maria",
+      "lastName": "Garcia",
+      "organization": "California Air Resources Board",
+      "postedDate": "2023-06-22T00:00:00Z",
+      "lastModifiedDate": "2023-06-22T12:00:00Z",
+      "objectId": "TEST-DOC-001"
+    }
+  }
+]

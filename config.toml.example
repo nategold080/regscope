@@ -1,0 +1,93 @@
+# RegScope Configuration
+# Copy this file to config.toml and customize as needed.
+
+[api]
+# Regulations.gov API key (get one free at https://api.data.gov/signup/)
+# Can also be passed via --api-key CLI flag or REGSCOPE_API_KEY env var
+api_key = ""
+
+# Rate limiting: target requests per hour (max 1000, recommend 900 for safety buffer)
+requests_per_hour = 900
+
+# Retry settings for failed API requests
+max_retries = 3
+retry_backoff_base = 2.0  # seconds, exponential backoff multiplier
+
+[data]
+# Directory where per-docket SQLite databases are stored
+data_dir = "~/.regscope/data"
+
+# Directory for downloaded attachment files (PDFs, etc.)
+attachments_dir = "~/.regscope/attachments"
+
+[embedding]
+# Sentence transformer model for embeddings
+# "all-MiniLM-L6-v2" for speed, "all-mpnet-base-v2" for quality
+model = "all-MiniLM-L6-v2"
+
+# Batch size for embedding generation (reduce if running out of memory)
+batch_size = 64
+
+[dedup]
+# Near-duplicate detection: MinHash LSH Jaccard similarity threshold
+near_duplicate_threshold = 0.85
+
+# Number of permutations for MinHash (higher = more accurate, slower)
+num_perm = 128
+
+# Semantic similarity threshold for cosine similarity on embeddings
+semantic_threshold = 0.92
+
+[topics]
+# Minimum number of comments to form a topic
+min_topic_size = 10
+
+# Target number of topics ("auto" lets BERTopic decide)
+nr_topics = "auto"
+
+# Number of representative words per topic
+top_n_words = 10
+
+# UMAP parameters
+umap_n_neighbors = 15
+umap_n_components = 5
+umap_min_dist = 0.0
+
+# HDBSCAN parameters
+hdbscan_min_cluster_size = 10
+hdbscan_min_samples = 5
+
+[classification]
+# Zero-shot classification model for stance detection
+stance_model = "facebook/bart-large-mnli"
+
+# Confidence threshold below which stance is marked "unclear"
+stance_confidence_threshold = 0.4
+
+[substantiveness]
+# Weights for substantiveness scoring (should sum to ~1.0)
+weight_length = 0.15
+weight_citations = 0.20
+weight_section_references = 0.20
+weight_technical_vocab = 0.15
+weight_data_statistics = 0.15
+weight_legal_arguments = 0.10
+weight_not_form_letter = 0.05
+
+# Length scoring: diminishing returns curve
+length_optimal = 2000        # chars, score plateaus around here
+length_max_score = 15        # max points from length alone
+
+[report]
+# Number of top substantive comments to include in the report
+top_substantive_count = 20
+
+# Maximum excerpt length for comment quotes in the report (chars)
+max_excerpt_length = 500
+
+[logging]
+# Log level: DEBUG, INFO, WARNING, ERROR
+level = "INFO"
+
+# Log file path (empty string = no file logging)
+log_file = "~/.regscope/regscope.log"
