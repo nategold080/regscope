@@ -733,6 +733,79 @@ def main():
     else:
         section_note("No substantiveness scores available for this docket.")
 
+    # ── Top Substantive Comments (directly under distribution chart) ───
+    scored_comments = comments[comments["substantiveness_score"].notna()].copy()
+    if not scored_comments.empty:
+        top_sub = scored_comments.nlargest(10, "substantiveness_score")
+
+    if not scored_comments.empty and top_sub.iloc[0]["substantiveness_score"] >= 40:
+        st.markdown("")
+        st.markdown("**Most Substantive Comments**")
+        section_note(
+            "The highest-scoring comments by substantiveness &mdash; typically detailed legal, "
+            "technical, or policy arguments from organizations and expert stakeholders. "
+            "Click to read the full comment."
+        )
+
+        # Progressive disclosure — show 3 initially
+        sub_show_key = f"show_substantive_{selected_docket}"
+        if sub_show_key not in st.session_state:
+            st.session_state[sub_show_key] = 3
+
+        visible_sub = min(st.session_state[sub_show_key], len(top_sub))
+
+        for i, (_, row) in enumerate(top_sub.head(visible_sub).iterrows()):
+            score = int(row["substantiveness_score"])
+            org = row["organization"] if pd.notna(row["organization"]) and row["organization"] else None
+            name = row["submitter_name"] if pd.notna(row["submitter_name"]) else None
+            text = row["full_text"] if pd.notna(row.get("full_text")) else row.get("comment_text", "")
+            stakeholder = fmt_stakeholder(row["stakeholder_type"]) if pd.notna(row.get("stakeholder_type")) else None
+            stance = fmt_stance(row["stance"]) if pd.notna(row.get("stance")) else None
+
+            # Build attribution
+            if org:
+                attribution = org
+            elif name:
+                attribution = name
+            else:
+                attribution = "Anonymous"
+
+            # Build metadata tags
+            tags = []
+            if stakeholder and stakeholder != "Unknown":
+                tags.append(stakeholder)
+            if stance and stance != "Unknown":
+                tags.append(stance)
+            text_len = len(str(text)) if text else 0
+            if text_len > 1000:
+                tags.append(f"{text_len:,} chars")
+
+            header = f"#{i + 1} \u2014 {attribution}"
+
+            with st.expander(header, expanded=(i == 0)):
+                tag_str = " &bull; ".join(tags)
+                if tag_str:
+                    st.markdown(
+                        f"<span style='color:#94A3B8;font-size:0.8rem'>"
+                        f"Score: {score}/100 &bull; {tag_str}</span>",
+                        unsafe_allow_html=True,
+                    )
+                if text:
+                    clean = clean_html(str(text))
+                    # Show full text in scrollable container
+                    st.markdown(
+                        f"<div style='background:#1B2A4A;padding:14px;border-radius:8px;"
+                        f"font-size:0.85rem;line-height:1.6;max-height:400px;overflow-y:auto;"
+                        f"white-space:pre-wrap'>{clean[:3000]}{'...' if len(clean) > 3000 else ''}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        if visible_sub < len(top_sub):
+            remaining_sub = len(top_sub) - visible_sub
+            if st.button(f"Show more comments ({remaining_sub} remaining)", key=f"more_sub_{selected_docket}"):
+                st.session_state[sub_show_key] += 3
+                st.rerun()
+
     # ── Duplicate / Form Letter Analysis ───────────────────────────────
     section_header("Duplicate & Form Letter Analysis")
     section_note(
@@ -856,78 +929,6 @@ def main():
     else:
         st.info("No duplicate or form letter groups detected for this docket.")
 
-    # ── Top Substantive Comments ───────────────────────────────────────
-    scored_comments = comments[comments["substantiveness_score"].notna()].copy()
-    if not scored_comments.empty:
-        top_sub = scored_comments.nlargest(10, "substantiveness_score")
-
-    if not scored_comments.empty and top_sub.iloc[0]["substantiveness_score"] >= 40:
-        section_header("Most Substantive Comments")
-        section_note(
-            "The highest-scoring comments by substantiveness &mdash; typically detailed legal, "
-            "technical, or policy arguments from organizations and expert stakeholders. "
-            "Click to read the full comment."
-        )
-
-        # Progressive disclosure — show 3 initially
-        sub_show_key = f"show_substantive_{selected_docket}"
-        if sub_show_key not in st.session_state:
-            st.session_state[sub_show_key] = 3
-
-        visible_sub = min(st.session_state[sub_show_key], len(top_sub))
-
-        for i, (_, row) in enumerate(top_sub.head(visible_sub).iterrows()):
-            score = int(row["substantiveness_score"])
-            org = row["organization"] if pd.notna(row["organization"]) and row["organization"] else None
-            name = row["submitter_name"] if pd.notna(row["submitter_name"]) else None
-            text = row["full_text"] if pd.notna(row.get("full_text")) else row.get("comment_text", "")
-            stakeholder = fmt_stakeholder(row["stakeholder_type"]) if pd.notna(row.get("stakeholder_type")) else None
-            stance = fmt_stance(row["stance"]) if pd.notna(row.get("stance")) else None
-
-            # Build attribution
-            if org:
-                attribution = org
-            elif name:
-                attribution = name
-            else:
-                attribution = "Anonymous"
-
-            # Build metadata tags
-            tags = []
-            if stakeholder and stakeholder != "Unknown":
-                tags.append(stakeholder)
-            if stance and stance != "Unknown":
-                tags.append(stance)
-            text_len = len(str(text)) if text else 0
-            if text_len > 1000:
-                tags.append(f"{text_len:,} chars")
-
-            header = f"#{i + 1} \u2014 {attribution}"
-
-            with st.expander(header, expanded=(i == 0)):
-                tag_str = " &bull; ".join(tags)
-                if tag_str:
-                    st.markdown(
-                        f"<span style='color:#94A3B8;font-size:0.8rem'>"
-                        f"Score: {score}/100 &bull; {tag_str}</span>",
-                        unsafe_allow_html=True,
-                    )
-                if text:
-                    clean = clean_html(str(text))
-                    # Show full text in scrollable container
-                    st.markdown(
-                        f"<div style='background:#1B2A4A;padding:14px;border-radius:8px;"
-                        f"font-size:0.85rem;line-height:1.6;max-height:400px;overflow-y:auto;"
-                        f"white-space:pre-wrap'>{clean[:3000]}{'...' if len(clean) > 3000 else ''}</div>",
-                        unsafe_allow_html=True,
-                    )
-
-        if visible_sub < len(top_sub):
-            remaining_sub = len(top_sub) - visible_sub
-            if st.button(f"Show more comments ({remaining_sub} remaining)", key=f"more_sub_{selected_docket}"):
-                st.session_state[sub_show_key] += 3
-                st.rerun()
-
     # ── Comment Explorer ───────────────────────────────────────────────
     section_header("Comment Explorer")
 
@@ -960,10 +961,11 @@ def main():
     display_df = explorer_df[display_cols].copy()
     display_df["stakeholder_type"] = display_df["stakeholder_type"].apply(fmt_stakeholder)
     display_df["stance"] = display_df["stance"].apply(fmt_stance)
+    display_df = display_df.sort_values("substantiveness_score", ascending=False, na_position="last")
 
     st.write(f"Showing **{len(display_df):,}** comments")
     st.dataframe(
-        display_df.head(200),
+        display_df.head(500),
         column_config={
             "comment_id": "Comment ID",
             "submitter_name": "Submitter",
