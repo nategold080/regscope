@@ -396,6 +396,21 @@ def main():
         unsafe_allow_html=True,
     )
 
+    # ── Overview / Proof of Concept Note ──────────────────────────────
+    st.markdown(
+        "<div style='background: #1B2A4A; border: 1px solid #334155; border-radius: 10px; "
+        "padding: 20px 24px; margin-bottom: 1.2rem; line-height: 1.7;'>"
+        "<span style='font-family: Inter, sans-serif; font-size: 0.95rem; color: #E2E8F0;'>"
+        "RegScope is a fully automated NLP pipeline that downloads public comments from "
+        "Regulations.gov and produces structured analysis — stance detection, stakeholder "
+        "classification, topic modeling, and form letter deduplication — at zero marginal cost "
+        "per comment. The current dataset covers a handful of dockets as a "
+        "<strong>proof of concept</strong>. The pipeline can be pointed at any federal rulemaking "
+        "docket, and expansion to hundreds of dockets across all federal agencies is underway."
+        "</span></div>",
+        unsafe_allow_html=True,
+    )
+
     # ── Load docket index ──────────────────────────────────────────────
     dockets = discover_dockets()
 
@@ -1037,14 +1052,18 @@ from Regulations.gov:
     st.markdown("")
     st.divider()
     st.markdown(
-        "<div style='text-align: center; color: #94A3B8; font-size: 0.8rem; padding: 8px 0;'>"
+        "<div style='text-align: center; padding: 16px 0;'>"
+        "<p style='font-family: Inter, sans-serif; font-size: 1.3rem; font-weight: 600; "
+        "color: #FFFFFF; margin-bottom: 6px;'>Built by Nathan Goldberg</p>"
+        "<p style='font-family: Inter, sans-serif; font-size: 1rem; margin-top: 0; margin-bottom: 16px;'>"
+        "<a href='mailto:nathanmauricegoldberg@gmail.com' style='color: #0984E3; text-decoration: none;'>nathanmauricegoldberg@gmail.com</a>"
+        " &nbsp;&bull;&nbsp; "
+        "<a href='https://www.linkedin.com/in/nathan-goldberg-62a44522a' target='_blank' "
+        "style='color: #0984E3; text-decoration: none;'>LinkedIn</a></p>"
+        "<p style='font-family: Inter, sans-serif; font-size: 0.8rem; color: #94A3B8; margin-top: 0;'>"
         "RegScope &bull; Federal Rulemaking Comment Analyzer &bull; "
         "Data sourced from Regulations.gov API &bull; "
-        "Zero-cost NLP pipeline: embeddings &rarr; dedup &rarr; classify &rarr; topic model"
-        "<br>"
-        "Built by <strong>Nathan Goldberg</strong> &nbsp;|&nbsp; "
-        "<a href='mailto:nathanmauricegoldberg@gmail.com' style='color: #0984E3; text-decoration: none;'>nathanmauricegoldberg@gmail.com</a> &nbsp;|&nbsp; "
-        "<a href='https://www.linkedin.com/in/nathan-goldberg-62a44522a' target='_blank' style='color: #0984E3; text-decoration: none;'>LinkedIn</a>"
+        "Zero-cost NLP pipeline: embeddings &rarr; dedup &rarr; classify &rarr; topic model</p>"
         "</div>",
         unsafe_allow_html=True,
     )
