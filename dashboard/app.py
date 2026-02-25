@@ -5,6 +5,7 @@ Polished, client-facing dashboard for demos and outreach.
 Run: streamlit run dashboard/app.py
 """
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -67,13 +68,52 @@ def section_header(text):
     )
 
 
+def section_note(text):
+    """Render an explanatory note beneath a section header — brighter and larger than st.caption."""
+    st.markdown(
+        f'<p style="font-family: Inter, sans-serif; font-size: 0.92rem; color: #CBD5E1; '
+        f'margin-top: -0.2rem; margin-bottom: 0.6rem; line-height: 1.5;">{text}</p>',
+        unsafe_allow_html=True,
+    )
+
+
+def clean_topic_label(label, llm_label=None):
+    """Convert a BERTopic raw label into a human-readable string.
+
+    If llm_label is available, use it. Otherwise, parse the raw label
+    (e.g. '0_harlem_harlem river_river_rowing') into 'Harlem, Harlem River, River, Rowing'.
+    """
+    if llm_label and pd.notna(llm_label) and str(llm_label).strip():
+        return str(llm_label).strip()
+    if not label or not pd.notna(label):
+        return "Unknown Topic"
+    label = str(label).strip()
+    # Strip leading number prefix like "0_", "12_"
+    cleaned = re.sub(r"^\d+_", "", label)
+    if not cleaned:
+        return label.title()
+    # Split on underscore, title-case each keyword, join with commas
+    keywords = [kw.strip().title() for kw in cleaned.split("_") if kw.strip()]
+    # Deduplicate while preserving order
+    seen = set()
+    unique_kw = []
+    for kw in keywords:
+        kw_lower = kw.lower()
+        if kw_lower not in seen:
+            seen.add(kw_lower)
+            unique_kw.append(kw)
+    return ", ".join(unique_kw) if unique_kw else label.title()
+
+
 def plotly_dark_layout(fig, **kwargs):
+    # Allow callers to override margin by extracting it from kwargs
+    margin = kwargs.pop("margin", dict(l=40, r=40, t=40, b=40))
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family="Inter, sans-serif"),
-        margin=dict(l=40, r=20, t=40, b=40),
+        margin=margin,
         **kwargs,
     )
     return fig
@@ -334,6 +374,7 @@ def main():
     with col1:
         section_header("Comments by Docket")
 
+        max_comments = max(d["comments"] for d in dockets)
         fig = go.Figure(go.Bar(
             y=[d["docket_id"] for d in dockets],
             x=[d["comments"] for d in dockets],
@@ -344,7 +385,9 @@ def main():
         ))
         plotly_dark_layout(fig, height=300, showlegend=False,
                           xaxis_title="Number of Comments",
-                          yaxis=dict(autorange="reversed"))
+                          xaxis_range=[0, max_comments * 1.25],
+                          yaxis=dict(autorange="reversed"),
+                          margin=dict(l=40, r=60, t=40, b=40))
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
@@ -418,8 +461,11 @@ def main():
                 text=stance_df["count"], textposition="outside",
             ))
             plotly_dark_layout(fig, height=380, showlegend=False,
-                              xaxis_tickangle=-30, yaxis_title="Comments")
+                              xaxis_tickangle=-30, yaxis_title="Comments",
+                              margin=dict(l=40, r=20, t=40, b=80))
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No stance data available for this docket.")
 
     with col2:
         section_header("Stakeholder Breakdown")
@@ -440,12 +486,14 @@ def main():
             plotly_dark_layout(fig, height=380, showlegend=True)
             fig.update_traces(textposition="inside", textinfo="percent+label", textfont_size=10)
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No stakeholder data available for this docket.")
 
     # ── Stance by Stakeholder Cross-tab ────────────────────────────────
+    section_header("Stance by Stakeholder Type")
     cross = comments[comments["stance"].notna() & comments["stakeholder_type"].notna()]
     if len(cross) > 10:
-        section_header("Stance by Stakeholder Type")
-        st.caption("Showing stance as a percentage within each stakeholder type — hover for counts")
+        section_note("Showing stance as a percentage within each stakeholder type &mdash; hover for raw counts")
 
         pivot = cross.groupby(["stakeholder_type", "stance"]).size().reset_index(name="count")
         # Calculate percentage within each stakeholder type
@@ -457,9 +505,6 @@ def main():
         totals_map = pivot.groupby("stakeholder_type")["count"].sum().to_dict()
         pivot["type_with_n"] = pivot["stakeholder_type"].apply(
             lambda t: f"{fmt_stakeholder(t)} (n={totals_map.get(t, 0):,})"
-        )
-        pivot["hover"] = pivot.apply(
-            lambda r: f"{r['stance_label']}: {r['count']} comments ({r['pct']}%)", axis=1
         )
 
         fig = px.bar(
@@ -475,23 +520,30 @@ def main():
         plotly_dark_layout(fig, height=400, xaxis_tickangle=-30,
                           yaxis_title="% of Comments", yaxis_range=[0, 105])
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        section_note("Insufficient cross-classified data to display this chart (requires &gt;10 comments with both stance and stakeholder type)")
 
     # ── Topic Analysis ─────────────────────────────────────────────────
+    section_header("Topic Analysis")
     if not topics.empty:
-        section_header("Topic Analysis")
+        section_note(
+            "Comments are clustered into topics using BERTopic (sentence embeddings + HDBSCAN). "
+            "Each bar represents a discovered theme with its top keywords."
+        )
 
         topic_display = topics.copy()
         topic_display["display_label"] = topic_display.apply(
-            lambda r: r["llm_label"] if pd.notna(r.get("llm_label")) and r.get("llm_label")
-            else r["label"] if pd.notna(r["label"]) else f"Topic {r['topic_id']}",
+            lambda r: clean_topic_label(r.get("label"), r.get("llm_label")),
             axis=1,
         )
 
-        # Filter out BERTopic outlier/noise cluster (topic -1, typically labeled "Miscellaneous / Outliers")
-        is_outlier = topic_display["display_label"].str.lower().str.contains("miscellaneous|outlier", na=False)
+        # Filter out BERTopic outlier/noise cluster (topic -1)
+        is_outlier = (
+            topic_display["display_label"].str.lower().str.contains("miscellaneous|outlier", na=False)
+        )
         if "bertopic_id" in topic_display.columns:
             is_outlier = is_outlier | (topic_display["bertopic_id"] == -1)
-        outlier_count = topic_display.loc[is_outlier, "topic_size"].sum()
+        outlier_count = int(topic_display.loc[is_outlier, "topic_size"].sum())
         topic_filtered = topic_display[~is_outlier].copy()
 
         # Truncate for display
@@ -501,66 +553,101 @@ def main():
 
         top_n = topic_filtered.head(15)
         if outlier_count > 0:
-            st.caption(f"{outlier_count:,} comments fell outside identified topic clusters and are excluded from this chart")
+            section_note(
+                f"{outlier_count:,} comments fell outside identified topic clusters and are excluded from this chart"
+            )
 
-        fig = go.Figure(go.Bar(
-            y=top_n["display_label"],
-            x=top_n["topic_size"],
-            orientation="h",
-            marker_color=ACCENT_BLUE,
-            text=top_n["topic_size"],
-            textposition="outside",
-        ))
-        plotly_dark_layout(fig, height=max(300, len(top_n) * 30 + 80),
-                          showlegend=False,
-                          xaxis_title="Number of Comments",
-                          yaxis=dict(autorange="reversed"))
-        st.plotly_chart(fig, use_container_width=True)
+        if not top_n.empty:
+            max_topic = int(top_n["topic_size"].max())
+            fig = go.Figure(go.Bar(
+                y=top_n["display_label"],
+                x=top_n["topic_size"],
+                orientation="h",
+                marker_color=ACCENT_BLUE,
+                text=top_n["topic_size"],
+                textposition="outside",
+            ))
+            plotly_dark_layout(fig, height=max(300, len(top_n) * 35 + 80),
+                              showlegend=False,
+                              xaxis_title="Number of Comments",
+                              xaxis_range=[0, max_topic * 1.2],
+                              yaxis=dict(autorange="reversed"),
+                              margin=dict(l=40, r=60, t=20, b=40))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No topic clusters identified for this docket.")
+    else:
+        section_note("Topic modeling has not been run for this docket.")
 
     # ── Substantiveness Distribution ───────────────────────────────────
     sub_scores = comments[comments["substantiveness_score"].notna()]["substantiveness_score"]
+    section_header("Substantiveness Score Distribution")
     if not sub_scores.empty:
-        section_header("Substantiveness Score Distribution")
-        st.caption(
-            "Each comment is scored 0–100 based on length, specificity, citations, "
+        section_note(
+            "Each comment is scored 0&ndash;100 based on length, specificity, citations, "
             "technical language, and uniqueness. Form letters score low; detailed "
             "legal or technical arguments score high."
         )
 
+        total_scored = len(sub_scores)
+
         # Bin into meaningful categories
-        bins = [
+        all_bins = [
             ("Form Letters\n(0–19)", 0, 19, "#FF7675"),
             ("Low\n(20–39)", 20, 39, "#FDCB6E"),
             ("Moderate\n(40–59)", 40, 59, "#74B9FF"),
             ("High\n(60–79)", 60, 79, "#0984E3"),
             ("Highly Substantive\n(80–100)", 80, 100, "#00B894"),
         ]
-        bin_labels, bin_counts, bin_colors = [], [], []
-        for label, lo, hi, color in bins:
+        bin_data = []
+        for label, lo, hi, color in all_bins:
             count = int(((sub_scores >= lo) & (sub_scores <= hi)).sum())
-            bin_labels.append(label)
-            bin_counts.append(count)
-            bin_colors.append(color)
+            pct = round(count / total_scored * 100, 1) if total_scored > 0 else 0
+            bin_data.append({"label": label, "count": count, "pct": pct, "color": color})
+
+        # Trim empty bars from edges only — find first and last non-zero
+        first_nonzero = 0
+        last_nonzero = len(bin_data) - 1
+        for i, b in enumerate(bin_data):
+            if b["count"] > 0:
+                first_nonzero = i
+                break
+        for i in range(len(bin_data) - 1, -1, -1):
+            if bin_data[i]["count"] > 0:
+                last_nonzero = i
+                break
+        # Always show all bins between (and including) the first and last non-zero
+        visible = bin_data[first_nonzero:last_nonzero + 1]
 
         fig = go.Figure(go.Bar(
-            x=bin_labels, y=bin_counts,
-            marker_color=bin_colors,
-            text=[f"{c:,}" for c in bin_counts],
+            x=[b["label"] for b in visible],
+            y=[b["pct"] for b in visible],
+            marker_color=[b["color"] for b in visible],
+            text=[f"{b['pct']:.0f}%" for b in visible],
             textposition="outside",
+            customdata=[[b["count"]] for b in visible],
+            hovertemplate="%{x}: %{customdata[0]:,} comments (%{y:.1f}%)<extra></extra>",
         ))
+        max_pct = max(b["pct"] for b in visible) if visible else 100
         plotly_dark_layout(fig, height=350, showlegend=False,
-                          xaxis_title="", yaxis_title="Number of Comments")
+                          xaxis_title="", yaxis_title="% of Comments",
+                          yaxis_range=[0, min(max_pct * 1.25, 105)],
+                          margin=dict(l=40, r=20, t=50, b=40))
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        section_note("No substantiveness scores available for this docket.")
 
     # ── Duplicate / Form Letter Analysis ───────────────────────────────
-    if not dedup_groups.empty:
-        section_header("Duplicate & Form Letter Analysis")
-        st.caption(
-            "Comments are grouped by similarity: exact duplicates share identical text, "
-            "near-duplicates are form letters with minor edits (name changes, typos), "
-            "and semantic matches convey the same argument in different words."
-        )
+    section_header("Duplicate & Form Letter Analysis")
+    section_note(
+        "Comments are grouped by similarity: exact duplicates share identical text, "
+        "near-duplicates are form letters with minor edits (name changes, typos), "
+        "and semantic matches convey the same argument in different words."
+    )
 
+    multi_groups = dedup_groups[dedup_groups["group_size"] > 1] if not dedup_groups.empty else pd.DataFrame()
+
+    if not dedup_groups.empty and not multi_groups.empty:
         col1, col2 = st.columns([1, 2])
 
         with col1:
@@ -574,23 +661,25 @@ def main():
                 text=[f"{v:,}" for v in type_counts.values],
                 textposition="outside",
             ))
+            max_type = int(max(type_counts.values))
             plotly_dark_layout(fig, height=320, showlegend=False,
                               yaxis_title="Number of Groups",
+                              yaxis_range=[0, max_type * 1.25],
                               margin=dict(l=40, r=20, t=50, b=40))
             st.plotly_chart(fig, use_container_width=True)
 
             # Summary stats
-            total_duped = dedup_groups[dedup_groups["group_size"] > 1]["group_size"].sum()
-            total_groups = len(dedup_groups[dedup_groups["group_size"] > 1])
+            total_duped = int(multi_groups["group_size"].sum())
+            total_groups = len(multi_groups)
             st.markdown(
                 f"**{total_groups}** campaigns produced **{total_duped:,}** duplicate comments"
             )
 
         with col2:
             st.markdown("**Top Form Letter Campaigns**")
-            top_campaigns = dedup_groups[dedup_groups["group_size"] > 1].head(10)
+            top_campaigns = multi_groups.head(10)
             type_color = {"exact": "#0984E3", "near": "#6C5CE7", "semantic": "#00B894"}
-            type_emoji = {"exact": "Exact", "near": "Near-duplicate", "semantic": "Semantic"}
+            type_badge = {"exact": "Exact", "near": "Near-duplicate", "semantic": "Semantic"}
 
             for _, row in top_campaigns.iterrows():
                 group_type = row["group_type"]
@@ -599,7 +688,7 @@ def main():
                 group_id = row["dedup_group_id"]
 
                 # Build header
-                badge = type_emoji.get(group_type, group_type)
+                badge = type_badge.get(group_type, group_type)
                 if template:
                     # Clean HTML tags for preview
                     preview = template.replace("<br/>", " ").replace("<br>", " ")
@@ -632,6 +721,8 @@ def main():
                             )
                         else:
                             st.write("No template text available for this group")
+    else:
+        st.info("No duplicate or form letter groups detected for this docket.")
 
     # ── Comment Explorer ───────────────────────────────────────────────
     section_header("Comment Explorer")
