@@ -742,7 +742,8 @@ def main():
     multi_groups = dedup_groups[dedup_groups["group_size"] > 1] if not dedup_groups.empty else pd.DataFrame()
 
     if not dedup_groups.empty and not multi_groups.empty:
-        col1, col2 = st.columns([1, 2])
+        # Charts side by side at top
+        col1, col2 = st.columns(2)
 
         with col1:
             type_counts = dedup_groups["group_type"].value_counts()
@@ -761,130 +762,157 @@ def main():
                               margin=dict(l=40, r=20, t=50, b=40))
             st.plotly_chart(fig, use_container_width=True)
 
+        with col2:
             # Uniqueness breakdown
             total_in_groups = int(multi_groups["group_size"].sum())
             unique_comments = n_comments - total_in_groups
-            if unique_comments > 0:
-                fig2 = px.pie(
-                    pd.DataFrame([
-                        {"type": "Unique", "count": unique_comments},
-                        {"type": "Duplicated", "count": total_in_groups},
-                    ]),
-                    values="count", names="type",
-                    color_discrete_sequence=["#00B894", "#FF7675"],
-                    hole=0.5,
-                )
-                plotly_dark_layout(fig2, height=200, showlegend=True,
-                                  margin=dict(l=10, r=10, t=10, b=10))
-                fig2.update_traces(textposition="inside", textinfo="percent+label", textfont_size=11)
-                st.plotly_chart(fig2, use_container_width=True)
-
-        with col2:
-            st.markdown("**Top Form Letter Campaigns**")
-            campaigns = aggregate_campaigns(dedup_groups, comments)
-            # Filter to only campaigns with template text
-            display_campaigns = [c for c in campaigns if c["template"]]
-            if not display_campaigns:
-                display_campaigns = campaigns
-
-            # Scrollable container — use st.container with fixed height via CSS
-            st.markdown(
-                '<div style="max-height: 500px; overflow-y: auto; padding-right: 8px;">',
-                unsafe_allow_html=True,
+            fig2 = px.pie(
+                pd.DataFrame([
+                    {"type": "Unique Comments", "count": max(unique_comments, 0)},
+                    {"type": "Duplicated Comments", "count": total_in_groups},
+                ]),
+                values="count", names="type",
+                color_discrete_sequence=["#00B894", "#FF7675"],
+                hole=0.5,
             )
-            type_color = {"exact": "#0984E3", "near": "#6C5CE7", "semantic": "#00B894"}
-            type_badge_label = {"exact": "Exact", "near": "Near-duplicate", "semantic": "Semantic"}
+            plotly_dark_layout(fig2, height=320, showlegend=True,
+                              margin=dict(l=10, r=10, t=40, b=10))
+            fig2.update_traces(textposition="inside", textinfo="percent+label", textfont_size=12)
+            st.plotly_chart(fig2, use_container_width=True)
 
-            for i, campaign in enumerate(display_campaigns[:12]):
-                group_type = campaign["group_type"]
-                total = campaign["total_copies"]
-                template = campaign["template"]
-                sub_groups = campaign["sub_groups"]
-                badge = type_badge_label.get(group_type, group_type)
+        total_groups = len(multi_groups)
+        st.markdown(
+            f"**{total_groups}** form letter campaigns produced **{total_in_groups:,}** "
+            f"duplicate comments out of **{n_comments:,}** total"
+        )
 
-                if template:
-                    preview = clean_html(template)[:90]
-                    if len(clean_html(template)) > 90:
-                        preview += "..."
-                else:
-                    preview = "(no template text)"
+        # Top Form Letter Campaigns — below charts, progressive disclosure
+        st.markdown("")
+        st.markdown("**Top Form Letter Campaigns**")
 
-                merged_note = f" ({sub_groups} sub-groups merged)" if sub_groups > 1 else ""
-                header = f"**{total:,} copies** \u2014 {badge}{merged_note} \u2014 {preview}"
-                with st.expander(header, expanded=(i == 0)):
-                    ec1, ec2 = st.columns([1, 4])
-                    with ec1:
-                        st.metric("Total Copies", f"{total:,}")
-                        if sub_groups > 1:
-                            st.markdown(f"*{sub_groups} variant groups*")
+        campaigns = aggregate_campaigns(dedup_groups, comments)
+        display_campaigns = [c for c in campaigns if c["template"]]
+        if not display_campaigns:
+            display_campaigns = campaigns
+
+        type_color = {"exact": "#0984E3", "near": "#6C5CE7", "semantic": "#00B894"}
+        type_badge_label = {"exact": "Exact", "near": "Near-duplicate", "semantic": "Semantic"}
+
+        # Show 3 initially, then 3 more per click
+        show_key = f"show_campaigns_{selected_docket}"
+        if show_key not in st.session_state:
+            st.session_state[show_key] = 3
+
+        visible_count = min(st.session_state[show_key], len(display_campaigns))
+
+        for i in range(visible_count):
+            campaign = display_campaigns[i]
+            group_type = campaign["group_type"]
+            total = campaign["total_copies"]
+            template = campaign["template"]
+            sub_groups = campaign["sub_groups"]
+            badge = type_badge_label.get(group_type, group_type)
+
+            if template:
+                preview = clean_html(template)[:90]
+                if len(clean_html(template)) > 90:
+                    preview += "..."
+            else:
+                preview = "(no template text)"
+
+            merged_note = f" ({sub_groups} variant groups merged)" if sub_groups > 1 else ""
+            header = f"**{total:,} copies** \u2014 {badge}{merged_note} \u2014 {preview}"
+            with st.expander(header, expanded=(i == 0)):
+                ec1, ec2 = st.columns([1, 4])
+                with ec1:
+                    st.metric("Total Copies", f"{total:,}")
+                    if sub_groups > 1:
+                        st.markdown(f"*{sub_groups} variant groups*")
+                    st.markdown(
+                        f"<span style='background:{type_color.get(group_type, '#555')};color:white;"
+                        f"padding:2px 8px;border-radius:4px;font-size:0.75rem'>{badge}</span>",
+                        unsafe_allow_html=True,
+                    )
+                with ec2:
+                    if template:
+                        clean = clean_html(template)
                         st.markdown(
-                            f"<span style='background:{type_color.get(group_type, '#555')};color:white;"
-                            f"padding:2px 8px;border-radius:4px;font-size:0.75rem'>{badge}</span>",
+                            f"<div style='background:#1B2A4A;padding:12px;border-radius:8px;"
+                            f"font-size:0.85rem;line-height:1.5;max-height:200px;overflow-y:auto;"
+                            f"white-space:pre-wrap'>"
+                            f"{clean[:600]}{'...' if len(clean) > 600 else ''}</div>",
                             unsafe_allow_html=True,
                         )
-                    with ec2:
-                        if template:
-                            clean = clean_html(template)
-                            st.markdown(
-                                f"<div style='background:#1B2A4A;padding:12px;border-radius:8px;"
-                                f"font-size:0.85rem;line-height:1.5;max-height:200px;overflow-y:auto;"
-                                f"white-space:pre-wrap'>"
-                                f"{clean[:600]}{'...' if len(clean) > 600 else ''}</div>",
-                                unsafe_allow_html=True,
-                            )
 
-            st.markdown('</div>', unsafe_allow_html=True)
+        if visible_count < len(display_campaigns):
+            remaining = len(display_campaigns) - visible_count
+            if st.button(f"Show more campaigns ({remaining} remaining)", key=f"more_{selected_docket}"):
+                st.session_state[show_key] += 3
+                st.rerun()
     else:
         st.info("No duplicate or form letter groups detected for this docket.")
 
     # ── Top Substantive Comments ───────────────────────────────────────
-    top_sub = comments[comments["substantiveness_score"].notna()].nlargest(10, "substantiveness_score")
-    if not top_sub.empty and top_sub.iloc[0]["substantiveness_score"] >= 40:
+    scored_comments = comments[comments["substantiveness_score"].notna()].copy()
+    if not scored_comments.empty:
+        scored_comments["percentile"] = scored_comments["substantiveness_score"].rank(pct=True) * 100
+        top_sub = scored_comments.nlargest(5, "substantiveness_score")
+
+    if not scored_comments.empty and top_sub.iloc[0]["substantiveness_score"] >= 40:
         section_header("Most Substantive Comments")
         section_note(
             "The highest-scoring comments by substantiveness &mdash; typically detailed legal, "
-            "technical, or policy arguments from organizations and expert stakeholders"
+            "technical, or policy arguments from organizations and expert stakeholders. "
+            "Click to read the full comment."
         )
 
-        for _, row in top_sub.head(5).iterrows():
+        for _, row in top_sub.iterrows():
             score = int(row["substantiveness_score"])
+            pctile = int(row["percentile"])
             org = row["organization"] if pd.notna(row["organization"]) and row["organization"] else None
-            name = row["submitter_name"] if pd.notna(row["submitter_name"]) else "Anonymous"
+            name = row["submitter_name"] if pd.notna(row["submitter_name"]) else None
             text = row["full_text"] if pd.notna(row.get("full_text")) else row.get("comment_text", "")
             stakeholder = fmt_stakeholder(row["stakeholder_type"]) if pd.notna(row.get("stakeholder_type")) else None
             stance = fmt_stance(row["stance"]) if pd.notna(row.get("stance")) else None
 
-            # Build attribution line
-            attribution_parts = []
+            # Build attribution
             if org:
-                attribution_parts.append(f"**{org}**")
-            if name and name != "Anonymous":
-                attribution_parts.append(name)
-            attribution = " \u2014 ".join(attribution_parts) if attribution_parts else "Anonymous"
+                attribution = org
+            elif name:
+                attribution = name
+            else:
+                attribution = "Anonymous"
 
+            # Build metadata tags
             tags = []
             if stakeholder and stakeholder != "Unknown":
                 tags.append(stakeholder)
             if stance and stance != "Unknown":
                 tags.append(stance)
-            tag_str = " &bull; ".join(tags)
+            text_len = len(str(text)) if text else 0
+            if text_len > 1000:
+                tags.append(f"{text_len:,} chars")
 
-            preview = clean_html(str(text))[:300]
-            if len(clean_html(str(text))) > 300:
-                preview += "..."
+            pctile_label = f"Top {100 - pctile:.0f}%" if pctile > 50 else f"{pctile:.0f}th percentile"
+            header = f"{pctile_label} \u2014 {attribution}"
 
-            with st.expander(f"Score: {score}/100 \u2014 {attribution}", expanded=False):
+            with st.expander(header, expanded=False):
+                tag_str = " &bull; ".join(tags)
                 if tag_str:
                     st.markdown(
-                        f"<span style='color:#94A3B8;font-size:0.8rem'>{tag_str}</span>",
+                        f"<span style='color:#94A3B8;font-size:0.8rem'>"
+                        f"Score: {score}/100 &bull; {tag_str}</span>",
                         unsafe_allow_html=True,
                     )
-                st.markdown(
-                    f"<div style='background:#1B2A4A;padding:12px;border-radius:8px;"
-                    f"font-size:0.85rem;line-height:1.5;max-height:250px;overflow-y:auto;"
-                    f"white-space:pre-wrap'>{preview}</div>",
-                    unsafe_allow_html=True,
-                )
+                if text:
+                    clean = clean_html(str(text))
+                    # Show full text in scrollable container
+                    st.markdown(
+                        f"<div style='background:#1B2A4A;padding:14px;border-radius:8px;"
+                        f"font-size:0.85rem;line-height:1.6;max-height:400px;overflow-y:auto;"
+                        f"white-space:pre-wrap'>{clean[:3000]}{'...' if len(clean) > 3000 else ''}</div>",
+                        unsafe_allow_html=True,
+                    )
 
     # ── Comment Explorer ───────────────────────────────────────────────
     section_header("Comment Explorer")
