@@ -77,24 +77,29 @@ def section_note(text):
     )
 
 
-def clean_topic_label(label, llm_label=None):
-    """Convert a BERTopic raw label into a human-readable string.
+def clean_html(text):
+    """Strip common HTML entities and tags for display."""
+    if not text:
+        return ""
+    t = str(text)
+    t = t.replace("<br/>", "\n").replace("<br>", "\n").replace("<br />", "\n")
+    t = t.replace("&rsquo;", "\u2019").replace("&amp;", "&")
+    t = t.replace("&nbsp;", " ").replace("&ldquo;", "\u201c").replace("&rdquo;", "\u201d")
+    t = re.sub(r"<[^>]+>", "", t)
+    return t.strip()
 
-    If llm_label is available, use it. Otherwise, parse the raw label
-    (e.g. '0_harlem_harlem river_river_rowing') into 'Harlem, Harlem River, River, Rowing'.
-    """
+
+def clean_topic_label(label, llm_label=None):
+    """Convert a BERTopic raw label into a human-readable string."""
     if llm_label and pd.notna(llm_label) and str(llm_label).strip():
         return str(llm_label).strip()
     if not label or not pd.notna(label):
         return "Unknown Topic"
     label = str(label).strip()
-    # Strip leading number prefix like "0_", "12_"
     cleaned = re.sub(r"^\d+_", "", label)
     if not cleaned:
         return label.title()
-    # Split on underscore, title-case each keyword, join with commas
     keywords = [kw.strip().title() for kw in cleaned.split("_") if kw.strip()]
-    # Deduplicate while preserving order
     seen = set()
     unique_kw = []
     for kw in keywords:
@@ -106,7 +111,6 @@ def clean_topic_label(label, llm_label=None):
 
 
 def plotly_dark_layout(fig, **kwargs):
-    # Allow callers to override margin by extracting it from kwargs
     margin = kwargs.pop("margin", dict(l=40, r=40, t=40, b=40))
     fig.update_layout(
         template="plotly_dark",
@@ -156,12 +160,12 @@ def load_docket_data(db_path: str):
     """Load all relevant data from a single docket database."""
     conn = sqlite3.connect(db_path)
 
-    # Check if llm_label column exists in topics table
     topic_cols = {row[1] for row in conn.execute("PRAGMA table_info(topics)").fetchall()}
     has_llm_label = "llm_label" in topic_cols
 
     comments = pd.read_sql_query("""
         SELECT c.comment_id, c.submitter_name, c.organization, c.posted_date,
+               c.comment_text, c.full_text,
                c.dedup_group_id, c.semantic_group_id,
                cc.stakeholder_type, cc.stance, cc.stance_confidence,
                cc.substantiveness_score
@@ -172,21 +176,20 @@ def load_docket_data(db_path: str):
     if has_llm_label:
         topics = pd.read_sql_query("""
             SELECT topic_id, bertopic_id, label, keywords, topic_size, llm_label
-            FROM topics
-            ORDER BY topic_size DESC
+            FROM topics ORDER BY topic_size DESC
         """, conn)
     else:
         topics = pd.read_sql_query("""
             SELECT topic_id, bertopic_id, label, keywords, topic_size
-            FROM topics
-            ORDER BY topic_size DESC
+            FROM topics ORDER BY topic_size DESC
         """, conn)
         topics["llm_label"] = None
 
     dedup_groups = pd.read_sql_query("""
-        SELECT dedup_group_id, group_type, group_size, template_text
-        FROM dedup_groups
-        ORDER BY group_size DESC
+        SELECT dg.dedup_group_id, dg.group_type, dg.group_size, dg.template_text,
+               dg.representative_comment_id
+        FROM dedup_groups dg
+        ORDER BY dg.group_size DESC
     """, conn)
 
     if has_llm_label:
@@ -205,6 +208,12 @@ def load_docket_data(db_path: str):
         """, conn)
         comment_topics["llm_label"] = None
 
+    # Attachment stats
+    attach_total = conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0]
+    attach_extracted = conn.execute(
+        "SELECT COUNT(*) FROM attachments WHERE extracted_text IS NOT NULL AND extracted_text != ''"
+    ).fetchone()[0]
+
     conn.close()
 
     return {
@@ -212,7 +221,72 @@ def load_docket_data(db_path: str):
         "topics": topics,
         "dedup_groups": dedup_groups,
         "comment_topics": comment_topics,
+        "attach_total": attach_total,
+        "attach_extracted": attach_extracted,
     }
+
+
+def aggregate_campaigns(dedup_groups, comments_df):
+    """Aggregate dedup groups into form letter campaigns.
+
+    Near-duplicate groups with the same template text (first 100 chars)
+    are merged into a single campaign for display. Groups without template
+    text get the representative comment's text instead.
+    """
+    multi = dedup_groups[dedup_groups["group_size"] > 1].copy()
+    if multi.empty:
+        return []
+
+    # For groups without template_text, use representative comment text
+    comment_text_map = {}
+    if not comments_df.empty:
+        for col in ["full_text", "comment_text"]:
+            if col in comments_df.columns:
+                mapping = comments_df.dropna(subset=[col]).set_index("comment_id")[col].to_dict()
+                comment_text_map.update(mapping)
+
+    campaigns = []
+    for _, row in multi.iterrows():
+        template = str(row["template_text"]) if pd.notna(row["template_text"]) else None
+        if not template and pd.notna(row.get("representative_comment_id")):
+            rep_id = row["representative_comment_id"]
+            template = comment_text_map.get(rep_id)
+        campaigns.append({
+            "group_ids": [row["dedup_group_id"]],
+            "group_type": row["group_type"],
+            "total_copies": int(row["group_size"]),
+            "template": template,
+            "sub_groups": 1,
+        })
+
+    # Merge campaigns with matching template text prefix (near-dup groups of the same letter)
+    merged = []
+    used = set()
+    for i, c in enumerate(campaigns):
+        if i in used:
+            continue
+        if not c["template"]:
+            merged.append(c)
+            continue
+        prefix = clean_html(c["template"])[:100].lower().strip()
+        combined = dict(c)
+        for j in range(i + 1, len(campaigns)):
+            if j in used:
+                continue
+            other = campaigns[j]
+            if not other["template"]:
+                continue
+            other_prefix = clean_html(other["template"])[:100].lower().strip()
+            if prefix == other_prefix:
+                combined["total_copies"] += other["total_copies"]
+                combined["group_ids"].extend(other["group_ids"])
+                combined["sub_groups"] += 1
+                used.add(j)
+        merged.append(combined)
+        used.add(i)
+
+    merged.sort(key=lambda c: c["total_copies"], reverse=True)
+    return merged
 
 
 # ── Page layout ───────────────────────────────────────────────────────────
@@ -346,7 +420,6 @@ def main():
     section_header("Docket Overview")
 
     docket_df = pd.DataFrame(dockets)
-    # Truncate long titles for display
     docket_df["title_short"] = docket_df["title"].apply(
         lambda t: t[:80] + "..." if len(t) > 80 else t
     )
@@ -428,17 +501,45 @@ def main():
 
     # ── Docket KPIs ────────────────────────────────────────────────────
     n_comments = len(comments)
-    n_classified = comments["stakeholder_type"].notna().sum()
+    n_classified = int(comments["stakeholder_type"].notna().sum())
     unique_orgs = comments[comments["organization"].notna() & (comments["organization"] != "")]["organization"].nunique()
     avg_substantiveness = comments["substantiveness_score"].mean()
+    n_attachments = data["attach_total"]
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Comments", f"{n_comments:,}")
     c2.metric("Classified", f"{n_classified:,}")
     c3.metric("Unique Orgs", f"{unique_orgs:,}")
     c4.metric("Avg Substantiveness", f"{avg_substantiveness:.0f}/100" if pd.notna(avg_substantiveness) else "N/A")
+    c5.metric("Attachments", f"{n_attachments:,}")
 
     st.markdown("")
+
+    # ── Submission Timeline ────────────────────────────────────────────
+    dates = comments[comments["posted_date"].notna()]["posted_date"]
+    if not dates.empty:
+        try:
+            date_series = pd.to_datetime(dates, utc=True).dt.date
+        except Exception:
+            date_series = pd.to_datetime(dates, errors="coerce").dt.date
+        date_series = date_series.dropna()
+        distinct_dates = date_series.nunique()
+
+        if distinct_dates > 1:
+            section_header("Submission Timeline")
+            section_note("Daily volume of public comment submissions over the comment period")
+
+            timeline = date_series.value_counts().sort_index().reset_index()
+            timeline.columns = ["date", "count"]
+
+            fig = go.Figure(go.Bar(
+                x=timeline["date"], y=timeline["count"],
+                marker_color=ACCENT_BLUE,
+            ))
+            plotly_dark_layout(fig, height=280, showlegend=False,
+                              xaxis_title="Date", yaxis_title="Comments Submitted",
+                              margin=dict(l=40, r=20, t=20, b=40))
+            st.plotly_chart(fig, use_container_width=True)
 
     # ── Stance & Stakeholder Charts ────────────────────────────────────
     col1, col2 = st.columns(2)
@@ -496,12 +597,9 @@ def main():
         section_note("Showing stance as a percentage within each stakeholder type &mdash; hover for raw counts")
 
         pivot = cross.groupby(["stakeholder_type", "stance"]).size().reset_index(name="count")
-        # Calculate percentage within each stakeholder type
         type_totals = pivot.groupby("stakeholder_type")["count"].transform("sum")
         pivot["pct"] = (pivot["count"] / type_totals * 100).round(1)
         pivot["stance_label"] = pivot["stance"].apply(fmt_stance)
-        pivot["type_label"] = pivot["stakeholder_type"].apply(fmt_stakeholder)
-        # Add total count per stakeholder type for the x-axis label
         totals_map = pivot.groupby("stakeholder_type")["count"].sum().to_dict()
         pivot["type_with_n"] = pivot["stakeholder_type"].apply(
             lambda t: f"{fmt_stakeholder(t)} (n={totals_map.get(t, 0):,})"
@@ -528,7 +626,7 @@ def main():
     if not topics.empty:
         section_note(
             "Comments are clustered into topics using BERTopic (sentence embeddings + HDBSCAN). "
-            "Each bar represents a discovered theme with its top keywords."
+            "Each bar represents a discovered theme labeled by its top keywords."
         )
 
         topic_display = topics.copy()
@@ -537,7 +635,6 @@ def main():
             axis=1,
         )
 
-        # Filter out BERTopic outlier/noise cluster (topic -1)
         is_outlier = (
             topic_display["display_label"].str.lower().str.contains("miscellaneous|outlier", na=False)
         )
@@ -546,7 +643,6 @@ def main():
         outlier_count = int(topic_display.loc[is_outlier, "topic_size"].sum())
         topic_filtered = topic_display[~is_outlier].copy()
 
-        # Truncate for display
         topic_filtered["display_label"] = topic_filtered["display_label"].apply(
             lambda t: t[:70] + "..." if isinstance(t, str) and len(t) > 70 else t
         )
@@ -591,13 +687,12 @@ def main():
 
         total_scored = len(sub_scores)
 
-        # Bin into meaningful categories
         all_bins = [
-            ("Form Letters\n(0–19)", 0, 19, "#FF7675"),
-            ("Low\n(20–39)", 20, 39, "#FDCB6E"),
-            ("Moderate\n(40–59)", 40, 59, "#74B9FF"),
-            ("High\n(60–79)", 60, 79, "#0984E3"),
-            ("Highly Substantive\n(80–100)", 80, 100, "#00B894"),
+            ("Form Letters\n(0\u201319)", 0, 19, "#FF7675"),
+            ("Low\n(20\u201339)", 20, 39, "#FDCB6E"),
+            ("Moderate\n(40\u201359)", 40, 59, "#74B9FF"),
+            ("High\n(60\u201379)", 60, 79, "#0984E3"),
+            ("Highly Substantive\n(80\u2013100)", 80, 100, "#00B894"),
         ]
         bin_data = []
         for label, lo, hi, color in all_bins:
@@ -605,7 +700,7 @@ def main():
             pct = round(count / total_scored * 100, 1) if total_scored > 0 else 0
             bin_data.append({"label": label, "count": count, "pct": pct, "color": color})
 
-        # Trim empty bars from edges only — find first and last non-zero
+        # Trim empty bars from edges only
         first_nonzero = 0
         last_nonzero = len(bin_data) - 1
         for i, b in enumerate(bin_data):
@@ -616,9 +711,9 @@ def main():
             if bin_data[i]["count"] > 0:
                 last_nonzero = i
                 break
-        # Always show all bins between (and including) the first and last non-zero
         visible = bin_data[first_nonzero:last_nonzero + 1]
 
+        max_pct = max(b["pct"] for b in visible) if visible else 100
         fig = go.Figure(go.Bar(
             x=[b["label"] for b in visible],
             y=[b["pct"] for b in visible],
@@ -628,10 +723,9 @@ def main():
             customdata=[[b["count"]] for b in visible],
             hovertemplate="%{x}: %{customdata[0]:,} comments (%{y:.1f}%)<extra></extra>",
         ))
-        max_pct = max(b["pct"] for b in visible) if visible else 100
         plotly_dark_layout(fig, height=350, showlegend=False,
                           xaxis_title="", yaxis_title="% of Comments",
-                          yaxis_range=[0, min(max_pct * 1.25, 105)],
+                          yaxis_range=[0, min(max_pct * 1.3, 105)],
                           margin=dict(l=40, r=20, t=50, b=40))
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -651,7 +745,6 @@ def main():
         col1, col2 = st.columns([1, 2])
 
         with col1:
-            # By type
             type_counts = dedup_groups["group_type"].value_counts()
             type_labels = {"exact": "Exact\nDuplicates", "near": "Near\nDuplicates", "semantic": "Semantic\nMatches"}
             fig = go.Figure(go.Bar(
@@ -664,65 +757,134 @@ def main():
             max_type = int(max(type_counts.values))
             plotly_dark_layout(fig, height=320, showlegend=False,
                               yaxis_title="Number of Groups",
-                              yaxis_range=[0, max_type * 1.25],
+                              yaxis_range=[0, max_type * 1.3],
                               margin=dict(l=40, r=20, t=50, b=40))
             st.plotly_chart(fig, use_container_width=True)
 
-            # Summary stats
-            total_duped = int(multi_groups["group_size"].sum())
-            total_groups = len(multi_groups)
-            st.markdown(
-                f"**{total_groups}** campaigns produced **{total_duped:,}** duplicate comments"
-            )
+            # Uniqueness breakdown
+            total_in_groups = int(multi_groups["group_size"].sum())
+            unique_comments = n_comments - total_in_groups
+            if unique_comments > 0:
+                fig2 = px.pie(
+                    pd.DataFrame([
+                        {"type": "Unique", "count": unique_comments},
+                        {"type": "Duplicated", "count": total_in_groups},
+                    ]),
+                    values="count", names="type",
+                    color_discrete_sequence=["#00B894", "#FF7675"],
+                    hole=0.5,
+                )
+                plotly_dark_layout(fig2, height=200, showlegend=True,
+                                  margin=dict(l=10, r=10, t=10, b=10))
+                fig2.update_traces(textposition="inside", textinfo="percent+label", textfont_size=11)
+                st.plotly_chart(fig2, use_container_width=True)
 
         with col2:
             st.markdown("**Top Form Letter Campaigns**")
-            top_campaigns = multi_groups.head(10)
+            campaigns = aggregate_campaigns(dedup_groups, comments)
+            # Filter to only campaigns with template text
+            display_campaigns = [c for c in campaigns if c["template"]]
+            if not display_campaigns:
+                display_campaigns = campaigns
+
+            # Scrollable container — use st.container with fixed height via CSS
+            st.markdown(
+                '<div style="max-height: 500px; overflow-y: auto; padding-right: 8px;">',
+                unsafe_allow_html=True,
+            )
             type_color = {"exact": "#0984E3", "near": "#6C5CE7", "semantic": "#00B894"}
-            type_badge = {"exact": "Exact", "near": "Near-duplicate", "semantic": "Semantic"}
+            type_badge_label = {"exact": "Exact", "near": "Near-duplicate", "semantic": "Semantic"}
 
-            for _, row in top_campaigns.iterrows():
-                group_type = row["group_type"]
-                group_size = row["group_size"]
-                template = str(row["template_text"]) if pd.notna(row["template_text"]) else None
-                group_id = row["dedup_group_id"]
+            for i, campaign in enumerate(display_campaigns[:12]):
+                group_type = campaign["group_type"]
+                total = campaign["total_copies"]
+                template = campaign["template"]
+                sub_groups = campaign["sub_groups"]
+                badge = type_badge_label.get(group_type, group_type)
 
-                # Build header
-                badge = type_badge.get(group_type, group_type)
                 if template:
-                    # Clean HTML tags for preview
-                    preview = template.replace("<br/>", " ").replace("<br>", " ")
-                    preview = preview.replace("&rsquo;", "'").replace("&amp;", "&")
-                    preview = preview[:80] + "..." if len(preview) > 80 else preview
+                    preview = clean_html(template)[:90]
+                    if len(clean_html(template)) > 90:
+                        preview += "..."
                 else:
-                    preview = f"Group {group_id}"
+                    preview = "(no template text)"
 
-                header = f"**{group_size:,} copies** — {badge} — {preview}"
-                with st.expander(header, expanded=False):
-                    col_a, col_b = st.columns([1, 4])
-                    with col_a:
-                        st.metric("Copies", f"{group_size:,}")
+                merged_note = f" ({sub_groups} sub-groups merged)" if sub_groups > 1 else ""
+                header = f"**{total:,} copies** \u2014 {badge}{merged_note} \u2014 {preview}"
+                with st.expander(header, expanded=(i == 0)):
+                    ec1, ec2 = st.columns([1, 4])
+                    with ec1:
+                        st.metric("Total Copies", f"{total:,}")
+                        if sub_groups > 1:
+                            st.markdown(f"*{sub_groups} variant groups*")
                         st.markdown(
                             f"<span style='background:{type_color.get(group_type, '#555')};color:white;"
                             f"padding:2px 8px;border-radius:4px;font-size:0.75rem'>{badge}</span>",
                             unsafe_allow_html=True,
                         )
-                    with col_b:
+                    with ec2:
                         if template:
-                            # Clean up HTML for display
-                            clean = template.replace("<br/>", "\n").replace("<br>", "\n")
-                            clean = clean.replace("&rsquo;", "'").replace("&amp;", "&")
-                            clean = clean.replace("&nbsp;", " ")
+                            clean = clean_html(template)
                             st.markdown(
                                 f"<div style='background:#1B2A4A;padding:12px;border-radius:8px;"
-                                f"font-size:0.85rem;line-height:1.5;max-height:200px;overflow-y:auto'>"
-                                f"{clean[:500]}{'...' if len(clean) > 500 else ''}</div>",
+                                f"font-size:0.85rem;line-height:1.5;max-height:200px;overflow-y:auto;"
+                                f"white-space:pre-wrap'>"
+                                f"{clean[:600]}{'...' if len(clean) > 600 else ''}</div>",
                                 unsafe_allow_html=True,
                             )
-                        else:
-                            st.write("No template text available for this group")
+
+            st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.info("No duplicate or form letter groups detected for this docket.")
+
+    # ── Top Substantive Comments ───────────────────────────────────────
+    top_sub = comments[comments["substantiveness_score"].notna()].nlargest(10, "substantiveness_score")
+    if not top_sub.empty and top_sub.iloc[0]["substantiveness_score"] >= 40:
+        section_header("Most Substantive Comments")
+        section_note(
+            "The highest-scoring comments by substantiveness &mdash; typically detailed legal, "
+            "technical, or policy arguments from organizations and expert stakeholders"
+        )
+
+        for _, row in top_sub.head(5).iterrows():
+            score = int(row["substantiveness_score"])
+            org = row["organization"] if pd.notna(row["organization"]) and row["organization"] else None
+            name = row["submitter_name"] if pd.notna(row["submitter_name"]) else "Anonymous"
+            text = row["full_text"] if pd.notna(row.get("full_text")) else row.get("comment_text", "")
+            stakeholder = fmt_stakeholder(row["stakeholder_type"]) if pd.notna(row.get("stakeholder_type")) else None
+            stance = fmt_stance(row["stance"]) if pd.notna(row.get("stance")) else None
+
+            # Build attribution line
+            attribution_parts = []
+            if org:
+                attribution_parts.append(f"**{org}**")
+            if name and name != "Anonymous":
+                attribution_parts.append(name)
+            attribution = " \u2014 ".join(attribution_parts) if attribution_parts else "Anonymous"
+
+            tags = []
+            if stakeholder and stakeholder != "Unknown":
+                tags.append(stakeholder)
+            if stance and stance != "Unknown":
+                tags.append(stance)
+            tag_str = " &bull; ".join(tags)
+
+            preview = clean_html(str(text))[:300]
+            if len(clean_html(str(text))) > 300:
+                preview += "..."
+
+            with st.expander(f"Score: {score}/100 \u2014 {attribution}", expanded=False):
+                if tag_str:
+                    st.markdown(
+                        f"<span style='color:#94A3B8;font-size:0.8rem'>{tag_str}</span>",
+                        unsafe_allow_html=True,
+                    )
+                st.markdown(
+                    f"<div style='background:#1B2A4A;padding:12px;border-radius:8px;"
+                    f"font-size:0.85rem;line-height:1.5;max-height:250px;overflow-y:auto;"
+                    f"white-space:pre-wrap'>{preview}</div>",
+                    unsafe_allow_html=True,
+                )
 
     # ── Comment Explorer ───────────────────────────────────────────────
     section_header("Comment Explorer")
