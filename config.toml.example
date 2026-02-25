@@ -17,8 +17,6 @@ retry_backoff_base = 2.0  # seconds, exponential backoff multiplier
 # Directory where per-docket SQLite databases are stored
 data_dir = "~/.regscope/data"
 
-# Directory for downloaded attachment files (PDFs, etc.)
-attachments_dir = "~/.regscope/attachments"
 
 [embedding]
 # Sentence transformer model for embeddings
@@ -74,9 +72,13 @@ weight_data_statistics = 0.15
 weight_legal_arguments = 0.10
 weight_not_form_letter = 0.05
 
-# Length scoring: diminishing returns curve
-length_optimal = 2000        # chars, score plateaus around here
-length_max_score = 15        # max points from length alone
+
+[llm]
+# Enable LLM-generated topic labels (requires: pip install regscope[llm], OPENAI_API_KEY env var)
+enabled = false
+
+# Model to use for topic label generation
+model = "gpt-4o-mini"
 
 [report]
 # Number of top substantive comments to include in the report

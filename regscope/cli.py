@@ -12,6 +12,30 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 
+def _run_stages(db: "sqlite3.Connection", docket_id: str, stages: list[tuple[str, "typing.Callable"]]) -> None:
+    """Run a sequence of pipeline stages with logging and error handling.
+
+    Args:
+        db: SQLite database connection.
+        docket_id: The docket ID being processed.
+        stages: List of (stage_name, stage_function) tuples.
+    """
+    from regscope.db import log_pipeline_run
+
+    for stage_name, stage_fn in stages:
+        console.print(f"[cyan]Running stage:[/cyan] {stage_name}")
+        log_pipeline_run(db, docket_id, stage_name, "started")
+        try:
+            stage_fn()
+            log_pipeline_run(db, docket_id, stage_name, "completed")
+            console.print(f"  [green]Completed:[/green] {stage_name}")
+        except Exception:
+            logger.exception("Stage %s failed", stage_name)
+            log_pipeline_run(db, docket_id, stage_name, "failed")
+            console.print(f"  [red]Failed:[/red] {stage_name}")
+            raise
+
+
 def get_api_key(api_key: str | None, config: dict) -> str:
     """Resolve API key from CLI flag, config, or environment."""
     if api_key:
@@ -54,7 +78,7 @@ def analyze(ctx: click.Context, docket_id: str, api_key: str | None) -> None:
     from regscope.pipeline.topics import run_topics
     from regscope.pipeline.classify import run_classify
     from regscope.pipeline.report import run_report
-    from regscope.db import get_db, log_pipeline_run
+    from regscope.db import get_db
 
     db = get_db(docket_id, config)
     try:
@@ -70,17 +94,7 @@ def analyze(ctx: click.Context, docket_id: str, api_key: str | None) -> None:
             ("report", lambda: run_report(db, docket_id, config)),
         ]
 
-        for stage_name, stage_fn in stages:
-            console.print(f"[cyan]Running stage:[/cyan] {stage_name}")
-            try:
-                stage_fn()
-                log_pipeline_run(db, docket_id, stage_name, "completed")
-                console.print(f"  [green]Completed:[/green] {stage_name}")
-            except Exception:
-                logger.exception("Stage %s failed", stage_name)
-                log_pipeline_run(db, docket_id, stage_name, "failed")
-                console.print(f"  [red]Failed:[/red] {stage_name}")
-                raise
+        _run_stages(db, docket_id, stages)
 
         console.print(f"\n[bold green]Analysis complete for {docket_id}[/bold green]")
     finally:
@@ -102,9 +116,15 @@ def ingest(ctx: click.Context, docket_id: str, api_key: str | None) -> None:
     db = get_db(docket_id, config)
     try:
         console.print(f"\n[bold]Ingesting docket {docket_id}[/bold]\n")
+        log_pipeline_run(db, docket_id, "ingest", "started")
         run_ingest(db, docket_id, api_key, config)
         log_pipeline_run(db, docket_id, "ingest", "completed")
         console.print(f"\n[bold green]Ingest complete for {docket_id}[/bold green]")
+    except Exception:
+        logger.exception("Ingest failed for %s", docket_id)
+        log_pipeline_run(db, docket_id, "ingest", "failed")
+        console.print(f"\n[red]Ingest failed for {docket_id}[/red]")
+        raise
     finally:
         db.close()
 
@@ -122,7 +142,7 @@ def process(ctx: click.Context, docket_id: str) -> None:
     from regscope.pipeline.topics import run_topics
     from regscope.pipeline.classify import run_classify
     from regscope.pipeline.report import run_report
-    from regscope.db import get_db, log_pipeline_run
+    from regscope.db import get_db
 
     db = get_db(docket_id, config)
     try:
@@ -137,17 +157,7 @@ def process(ctx: click.Context, docket_id: str) -> None:
             ("report", lambda: run_report(db, docket_id, config)),
         ]
 
-        for stage_name, stage_fn in stages:
-            console.print(f"[cyan]Running stage:[/cyan] {stage_name}")
-            try:
-                stage_fn()
-                log_pipeline_run(db, docket_id, stage_name, "completed")
-                console.print(f"  [green]Completed:[/green] {stage_name}")
-            except Exception:
-                logger.exception("Stage %s failed", stage_name)
-                log_pipeline_run(db, docket_id, stage_name, "failed")
-                console.print(f"  [red]Failed:[/red] {stage_name}")
-                raise
+        _run_stages(db, docket_id, stages)
 
         console.print(f"\n[bold green]Processing complete for {docket_id}[/bold green]")
     finally:
@@ -156,37 +166,48 @@ def process(ctx: click.Context, docket_id: str) -> None:
 
 @cli.command("run-stage")
 @click.argument("docket_id")
-@click.option("--stage", required=True, type=click.Choice(["extract", "dedup", "embed", "topics", "classify", "report"]))
-@click.option("--api-key", default=None, help="Regulations.gov API key (only needed for ingest)")
+@click.option("--stage", "-s", required=True, type=click.Choice(["extract", "dedup", "embed", "topics", "classify", "report"]))
 @click.pass_context
-def run_stage(ctx: click.Context, docket_id: str, stage: str, api_key: str | None) -> None:
+def run_stage(ctx: click.Context, docket_id: str, stage: str) -> None:
     """Run a specific pipeline stage on a docket."""
     config = ctx.obj["config"]
 
     from regscope.db import get_db, log_pipeline_run
+    from regscope.pipeline.extract import run_extract
+    from regscope.pipeline.dedup import run_dedup
+    from regscope.pipeline.embed import run_embed
+    from regscope.pipeline.topics import run_topics
+    from regscope.pipeline.classify import run_classify
+    from regscope.pipeline.report import run_report
 
     stage_map = {
-        "extract": lambda: __import__("regscope.pipeline.extract", fromlist=["run_extract"]).run_extract(db, docket_id, config),
-        "dedup": lambda: __import__("regscope.pipeline.dedup", fromlist=["run_dedup"]).run_dedup(db, docket_id, config),
-        "embed": lambda: __import__("regscope.pipeline.embed", fromlist=["run_embed"]).run_embed(db, docket_id, config),
-        "topics": lambda: __import__("regscope.pipeline.topics", fromlist=["run_topics"]).run_topics(db, docket_id, config),
-        "classify": lambda: __import__("regscope.pipeline.classify", fromlist=["run_classify"]).run_classify(db, docket_id, config),
-        "report": lambda: __import__("regscope.pipeline.report", fromlist=["run_report"]).run_report(db, docket_id, config),
+        "extract": lambda: run_extract(db, docket_id, config),
+        "dedup": lambda: run_dedup(db, docket_id, config),
+        "embed": lambda: run_embed(db, docket_id, config),
+        "topics": lambda: run_topics(db, docket_id, config),
+        "classify": lambda: run_classify(db, docket_id, config),
+        "report": lambda: run_report(db, docket_id, config),
     }
 
     db = get_db(docket_id, config)
     try:
         console.print(f"\n[bold]Running stage '{stage}' on {docket_id}[/bold]\n")
+        log_pipeline_run(db, docket_id, stage, "started")
         stage_map[stage]()
         log_pipeline_run(db, docket_id, stage, "completed")
         console.print(f"\n[bold green]Stage '{stage}' complete[/bold green]")
+    except Exception:
+        logger.exception("Stage %s failed", stage)
+        log_pipeline_run(db, docket_id, stage, "failed")
+        console.print(f"\n[red]Stage '{stage}' failed[/red]")
+        raise
     finally:
         db.close()
 
 
 @cli.command()
 @click.argument("docket_id")
-@click.option("--format", "fmt", default="csv", type=click.Choice(["csv", "json", "excel"]))
+@click.option("--format", "-f", "fmt", default="csv", type=click.Choice(["csv", "json", "excel"]))
 @click.option("--output", "output_dir", default="./output/", help="Output directory")
 @click.pass_context
 def export(ctx: click.Context, docket_id: str, fmt: str, output_dir: str) -> None:

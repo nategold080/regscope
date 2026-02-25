@@ -1,5 +1,6 @@
 """Comment ingestion pipeline — downloads comments from Regulations.gov."""
 
+import json
 import logging
 import sqlite3
 from typing import Any
@@ -24,23 +25,22 @@ def run_ingest(db: sqlite3.Connection, docket_id: str, api_key: str, config: dic
     """
     from regscope.api.regulations import RegulationsClient
 
-    client = RegulationsClient(api_key, config)
+    with RegulationsClient(api_key, config) as client:
+        # Phase 1: Download docket metadata
+        logger.info("Fetching docket metadata for %s", docket_id)
+        docket_data = client.get_docket(docket_id)
+        if docket_data:
+            _store_docket(db, docket_id, docket_data)
 
-    # Phase 1: Download docket metadata
-    logger.info("Fetching docket metadata for %s", docket_id)
-    docket_data = client.get_docket(docket_id)
-    if docket_data:
-        _store_docket(db, docket_id, docket_data)
+        # Phase 2: Download comment headers (list endpoint)
+        logger.info("Downloading comment headers for %s", docket_id)
+        total_downloaded = _download_comment_headers(db, docket_id, client)
+        logger.info("Downloaded %d comment headers", total_downloaded)
 
-    # Phase 2: Download comment headers (list endpoint)
-    logger.info("Downloading comment headers for %s", docket_id)
-    total_downloaded = _download_comment_headers(db, docket_id, client)
-    logger.info("Downloaded %d comment headers", total_downloaded)
-
-    # Phase 3: Fetch individual comment details
-    logger.info("Fetching comment details for %s", docket_id)
-    total_detailed = _fetch_comment_details(db, docket_id, client)
-    logger.info("Fetched details for %d comments", total_detailed)
+        # Phase 3: Fetch individual comment details
+        logger.info("Fetching comment details for %s", docket_id)
+        total_detailed = _fetch_comment_details(db, docket_id, client)
+        logger.info("Fetched details for %d comments", total_detailed)
 
 
 def _store_docket(db: sqlite3.Connection, docket_id: str, data: dict) -> None:
@@ -57,7 +57,7 @@ def _store_docket(db: sqlite3.Connection, docket_id: str, data: dict) -> None:
             attrs.get("docketType", ""),
             attrs.get("modifyDate", ""),
             attrs.get("highlightedContent", ""),
-            __import__("json").dumps(data),
+            json.dumps(data),
         ),
     )
     db.commit()
@@ -67,8 +67,8 @@ def _download_comment_headers(db: sqlite3.Connection, docket_id: str, client: "R
     """Download comment headers via the list endpoint with cursor-based pagination."""
     from rich.progress import Progress
 
-    total = 0
     last_modified_date = None
+    api_fetched = 0
 
     # Check for existing comments to support resuming
     row = db.execute(
@@ -81,15 +81,13 @@ def _download_comment_headers(db: sqlite3.Connection, docket_id: str, client: "R
         ).fetchone()[0]
         if existing_count > 0:
             logger.info("Resuming download from %s (%d existing comments)", row[0], existing_count)
-            # Start from slightly before the last date to catch any missed
             last_modified_date = row[0]
-            total = existing_count
 
     with Progress() as progress:
         task = progress.add_task("Downloading comments...", total=None)
 
         while True:
-            page_count = 0
+            api_response_count = 0
             for page_num in range(1, 21):  # Max 20 pages per cursor window
                 comments = client.list_comments(
                     docket_id,
@@ -102,20 +100,23 @@ def _download_comment_headers(db: sqlite3.Connection, docket_id: str, client: "R
 
                 for comment_data in comments:
                     _store_comment_header(db, docket_id, comment_data)
-                    page_count += 1
 
-                total += len(comments)
-                progress.update(task, advance=len(comments), description=f"Downloaded {total} comments...")
+                api_response_count += len(comments)
+                api_fetched += len(comments)
+                db_count = db.execute(
+                    "SELECT COUNT(*) FROM comments WHERE docket_id = ?", (docket_id,)
+                ).fetchone()[0]
+                progress.update(task, completed=db_count, description=f"Downloaded {db_count} comments...")
                 db.commit()
 
                 if len(comments) < 250:
                     break
 
-            if page_count == 0:
+            if api_response_count == 0:
                 break
 
             # If we got a full 20 pages (5000 comments), need to cursor forward
-            if page_count >= 250 * 20:
+            if api_response_count >= 250 * 20:
                 row = db.execute(
                     "SELECT MAX(last_modified_date) FROM comments WHERE docket_id = ?",
                     (docket_id,),
@@ -126,13 +127,15 @@ def _download_comment_headers(db: sqlite3.Connection, docket_id: str, client: "R
 
             break
 
+    # Return actual count from DB, not the possibly-inflated API response count
+    total = db.execute(
+        "SELECT COUNT(*) FROM comments WHERE docket_id = ?", (docket_id,)
+    ).fetchone()[0]
     return total
 
 
 def _store_comment_header(db: sqlite3.Connection, docket_id: str, data: dict) -> None:
     """Store a comment header from the list endpoint."""
-    import json
-
     comment_id = data.get("id", "")
     attrs = data.get("attributes", {})
 
@@ -162,7 +165,6 @@ def _store_comment_header(db: sqlite3.Connection, docket_id: str, data: dict) ->
 
 def _fetch_comment_details(db: sqlite3.Connection, docket_id: str, client: "RegulationsClient") -> int:
     """Fetch full details for each comment that hasn't been detail-fetched yet."""
-    import json
     from rich.progress import Progress
 
     rows = db.execute(
@@ -195,9 +197,9 @@ def _fetch_comment_details(db: sqlite3.Connection, docket_id: str, client: "Regu
                            raw_json = ?
                            WHERE comment_id = ?""",
                         (
-                            attrs.get("comment") or "",
-                            submitter,
-                            attrs.get("organization") or "",
+                            attrs.get("comment") or None,
+                            submitter or None,
+                            attrs.get("organization") or None,
                             json.dumps(detail),
                             comment_id,
                         ),
@@ -230,7 +232,6 @@ def _store_attachment(db: sqlite3.Connection, comment_id: str, attachment_data: 
     format options (e.g., both PDF and DOCX). We prefer PDF for extraction,
     and store one row per attachment (not per format).
     """
-    import json
 
     attrs = attachment_data.get("attributes", {})
     title = attrs.get("title", "")

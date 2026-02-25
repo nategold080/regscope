@@ -5,7 +5,7 @@
 ## Quick Start
 
 ```bash
-git clone https://github.com/regscope/regscope.git && cd regscope
+git clone <your-repository-url> && cd regscope
 pip install -e .
 export REGSCOPE_API_KEY=your_key_here   # free from https://api.data.gov/signup/
 regscope analyze BOEM-2024-0008
@@ -74,7 +74,7 @@ All data is stored in per-docket SQLite databases at `~/.regscope/data/`.
 regscope analyze DOCKET_ID          # Full pipeline: download + analyze + report
 regscope ingest DOCKET_ID           # Download only
 regscope process DOCKET_ID          # Analyze already-downloaded data
-regscope run-stage DOCKET_ID -s X   # Run a single stage (ingest/extract/dedup/embed/topics/classify/report)
+regscope run-stage DOCKET_ID -s X   # Run a single stage (extract/dedup/embed/topics/classify/report)
 regscope report DOCKET_ID           # Regenerate the Markdown report
 regscope export DOCKET_ID -f csv    # Export to CSV, JSON, or Excel
 regscope status DOCKET_ID           # Show pipeline progress

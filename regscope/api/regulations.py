@@ -47,6 +47,15 @@ class RegulationsClient:
         if len(self.api_keys) > 1:
             logger.info("Using %d API keys with round-robin rotation", len(self.api_keys))
 
+    def __enter__(self):
+        """Support use as a context manager."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Close the HTTP client on context manager exit."""
+        self.close()
+        return False
+
     def _next_key(self) -> str:
         """Get the next API key in the rotation."""
         key = self.api_keys[self._key_index % len(self.api_keys)]

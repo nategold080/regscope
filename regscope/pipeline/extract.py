@@ -2,7 +2,6 @@
 
 import logging
 import sqlite3
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -34,14 +33,14 @@ def run_extract(db: sqlite3.Connection, docket_id: str, config: dict[str, Any]) 
         logger.info("Extracting text from %d attachments", len(attachments))
         with Progress() as progress:
             task = progress.add_task("Extracting text...", total=len(attachments))
-            for att_id, comment_id, file_url, file_format in attachments:
+            for i, (att_id, comment_id, file_url, file_format) in enumerate(attachments):
                 try:
                     text = _extract_attachment(file_url, file_format, config)
                     db.execute(
                         "UPDATE attachments SET extracted_text = ? WHERE attachment_id = ?",
                         (text, att_id),
                     )
-                    if att_id % 10 == 0:
+                    if (i + 1) % 10 == 0:
                         db.commit()
                 except Exception:
                     logger.exception("Failed to extract text from attachment %d", att_id)
@@ -66,7 +65,6 @@ def _extract_attachment(file_url: str, file_format: str, config: dict[str, Any])
         Extracted text content.
     """
     import httpx
-    import time
 
     # Download the file — downloads.regulations.gov WAF blocks bot User-Agents
     headers = {
@@ -152,7 +150,6 @@ def _ocr_pdf(content: bytes) -> str:
         OCR'd text.
     """
     try:
-        import tempfile
         from pdf2image import convert_from_bytes
         import pytesseract
 
@@ -180,6 +177,7 @@ def _extract_html(content: bytes) -> str:
     Returns:
         Plain text extracted from HTML.
     """
+    import html
     import re
 
     text = content.decode("utf-8", errors="replace")
@@ -188,13 +186,17 @@ def _extract_html(content: bytes) -> str:
     text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
     # Remove all HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
+    # Unescape HTML entities
+    text = html.unescape(text)
     # Clean up whitespace
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
 def _extract_docx(content: bytes) -> str:
-    """Extract text from DOCX content.
+    """Extract text from DOCX content using python-docx.
+
+    Extracts paragraphs and table contents, preserving structure.
 
     Args:
         content: Raw DOCX file bytes.
@@ -203,15 +205,21 @@ def _extract_docx(content: bytes) -> str:
         Extracted text.
     """
     try:
-        import zipfile
         import io
-        import re
+        from docx import Document
 
-        zf = zipfile.ZipFile(io.BytesIO(content))
-        xml_content = zf.read("word/document.xml").decode("utf-8")
-        # Extract text between XML tags
-        text = re.sub(r"<[^>]+>", "", xml_content)
-        return text.strip()
+        doc = Document(io.BytesIO(content))
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        # Also extract tables
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if cells:
+                    paragraphs.append(" | ".join(cells))
+        return "\n\n".join(paragraphs)
+    except ImportError:
+        logger.error("python-docx not installed — DOCX extraction unavailable")
+        return ""
     except Exception:
         logger.exception("Failed to extract text from DOCX")
         return ""

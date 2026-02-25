@@ -9,6 +9,8 @@ venv/
 .env
 *.db
 *.sqlite
+# Allow docket databases for Railway deployment
+!data/dockets/*.db
 .pytest_cache/
 .DS_Store
 output/

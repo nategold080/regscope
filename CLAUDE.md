@@ -9,9 +9,9 @@ You are building **RegScope**, a production-grade CLI tool that downloads, struc
 The core analysis pipeline MUST NOT depend on LLM API calls for per-comment processing. At 100K+ comments, LLM calls become prohibitively slow and expensive. Instead:
 - **Deduplication**: Sentence embeddings (sentence-transformers) + cosine similarity + MinHash/LSH. Deterministic. No LLM.
 - **Topic modeling**: BERTopic (HDBSCAN clustering on embeddings + c-TF-IDF for topic representation). Deterministic. No LLM.
-- **Stakeholder classification**: Rule-based heuristics on organization field + regex patterns + a small fine-tuned classifier. No LLM.
+- **Stakeholder classification**: Rule-based heuristics on organization field + regex patterns. No LLM.
 - **Stance detection**: Zero-shot classification via a small model (e.g., `facebook/bart-large-mnli`), NOT an API call to a large LLM.
-- **LLMs are permitted ONLY for**: (1) generating human-readable topic labels from keyword lists (batch, not per-comment), (2) generating the final summary report (one call at the end, not per-comment), (3) optional enrichment on a sampled subset.
+- **LLMs are permitted ONLY for**: (1) generating human-readable topic labels from keyword lists (batch, not per-comment). The final summary report is generated from heuristics and database queries, not LLM calls.
 
 ### Pipeline Stages Are Independent
 Each stage reads from and writes to the database. Every stage is restartable and idempotent. If a download is interrupted, it resumes. If topic modeling parameters change, only that stage re-runs.

@@ -1,6 +1,7 @@
 """Text cleaning and normalization utilities."""
 
 import hashlib
+import html as html_mod
 import re
 import unicodedata
 
@@ -116,6 +117,25 @@ def word_ngrams(text: str, n: int = 3) -> list[str]:
     if len(words) < n:
         return [" ".join(words)] if words else []
     return [" ".join(words[i : i + n]) for i in range(len(words) - n + 1)]
+
+
+def strip_html(text: str) -> str:
+    """Strip HTML tags and entities from text.
+
+    Unescapes HTML entities, converts <br> to spaces, removes all other tags,
+    and collapses whitespace.
+
+    Args:
+        text: Text potentially containing HTML markup.
+
+    Returns:
+        Plain text with HTML removed.
+    """
+    text = html_mod.unescape(text)
+    text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def truncate_text(text: str, max_length: int = 500) -> str:
