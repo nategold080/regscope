@@ -3,13 +3,13 @@
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 -- Migration tracking
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS comments (
 
 -- Attachments
 CREATE TABLE IF NOT EXISTS attachments (
-    attachment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attachment_id INTEGER PRIMARY KEY,
     comment_id TEXT NOT NULL,
     file_url TEXT,
     file_format TEXT,
@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS attachments (
     file_size INTEGER,
     extracted_text TEXT,
     raw_json TEXT,
-    FOREIGN KEY (comment_id) REFERENCES comments(comment_id)
+    FOREIGN KEY (comment_id) REFERENCES comments(comment_id),
+    UNIQUE(comment_id, file_url)
 );
 
 -- Embeddings (stored as binary blobs)
@@ -86,7 +87,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 -- Dedup groups
 CREATE TABLE IF NOT EXISTS dedup_groups (
-    dedup_group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedup_group_id INTEGER PRIMARY KEY,
     docket_id TEXT NOT NULL,
     group_type TEXT NOT NULL,  -- 'exact', 'near', 'semantic'
     group_size INTEGER DEFAULT 0,
@@ -99,7 +100,7 @@ CREATE TABLE IF NOT EXISTS dedup_groups (
 
 -- Topics
 CREATE TABLE IF NOT EXISTS topics (
-    topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER PRIMARY KEY,
     docket_id TEXT NOT NULL,
     bertopic_id INTEGER,
     label TEXT,
@@ -132,7 +133,7 @@ CREATE TABLE IF NOT EXISTS comment_classifications (
 
 -- Pipeline run log
 CREATE TABLE IF NOT EXISTS pipeline_runs (
-    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER PRIMARY KEY,
     docket_id TEXT NOT NULL,
     stage TEXT NOT NULL,
     status TEXT NOT NULL,  -- 'started', 'completed', 'failed'
@@ -225,6 +226,16 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             except sqlite3.OperationalError:
                 pass  # Column already exists (fresh DB from SCHEMA_SQL)
 
+        # v2 → v3: add unique constraint on attachments(comment_id, file_url)
+        if current_version < 3:
+            try:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_unique "
+                    "ON attachments(comment_id, file_url)"
+                )
+            except sqlite3.OperationalError:
+                pass  # Index already exists or duplicates present
+
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
             (SCHEMA_VERSION,),
@@ -261,7 +272,7 @@ def log_pipeline_run(
             status,
             json.dumps(parameters) if parameters else None,
             error_message,
-            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S") if status in ("completed", "failed") else None,
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if status in ("completed", "failed") else None,
         ),
     )
     db.commit()
@@ -375,6 +386,7 @@ def list_all_dockets(config: dict[str, Any]) -> list[dict[str, Any]]:
 
     dockets = []
     for db_file in sorted(data_dir.glob("*.db")):
+        conn = None
         try:
             conn = sqlite3.connect(str(db_file))
             row = conn.execute(
@@ -396,11 +408,36 @@ def list_all_dockets(config: dict[str, Any]) -> list[dict[str, Any]]:
                     "comment_count": count,
                     "last_updated": last_run or "",
                 })
-            conn.close()
         except Exception:
             logger.debug("Could not read database: %s", db_file)
+        finally:
+            if conn:
+                conn.close()
 
     return dockets
+
+
+# Whitelist of valid column names for comments table to prevent SQL injection
+VALID_COMMENT_COLUMNS = {
+    "comment_id", "docket_id", "document_id", "title", "comment_text",
+    "full_text", "submitter_name", "organization", "posted_date",
+    "last_modified_date", "text_hash", "dedup_group_id", "semantic_group_id",
+    "detail_fetched", "raw_json",
+}
+
+
+def _validate_columns(columns: set[str]) -> None:
+    """Validate that column names are in the whitelist.
+
+    Args:
+        columns: Set of column name strings to validate.
+
+    Raises:
+        ValueError: If any column name is not in the whitelist.
+    """
+    invalid = columns - VALID_COMMENT_COLUMNS
+    if invalid:
+        raise ValueError(f"Invalid column name(s): {', '.join(sorted(invalid))}")
 
 
 # --- Convenience query functions ---
@@ -430,14 +467,16 @@ def get_comments_batch(
         List of Row objects.
     """
     db.row_factory = sqlite3.Row
-    rows = db.execute(
-        """SELECT * FROM comments
-           WHERE docket_id = ?
-           ORDER BY posted_date
-           LIMIT ? OFFSET ?""",
-        (docket_id, limit, offset),
-    ).fetchall()
-    db.row_factory = None
+    try:
+        rows = db.execute(
+            """SELECT * FROM comments
+               WHERE docket_id = ?
+               ORDER BY posted_date
+               LIMIT ? OFFSET ?""",
+            (docket_id, limit, offset),
+        ).fetchall()
+    finally:
+        db.row_factory = None
     return rows
 
 
@@ -447,7 +486,11 @@ def insert_comment(db: sqlite3.Connection, **kwargs: Any) -> None:
     Args:
         db: SQLite database connection.
         **kwargs: Column name/value pairs.
+
+    Raises:
+        ValueError: If any column name is not in the whitelist.
     """
+    _validate_columns(set(kwargs.keys()))
     columns = ", ".join(kwargs.keys())
     placeholders = ", ".join("?" * len(kwargs))
     db.execute(
@@ -463,7 +506,11 @@ def update_comment_field(db: sqlite3.Connection, comment_id: str, **kwargs: Any)
         db: SQLite database connection.
         comment_id: The comment ID to update.
         **kwargs: Column name/value pairs to update.
+
+    Raises:
+        ValueError: If any column name is not in the whitelist.
     """
+    _validate_columns(set(kwargs.keys()))
     set_clause = ", ".join(f"{k} = ?" for k in kwargs.keys())
     db.execute(
         f"UPDATE comments SET {set_clause} WHERE comment_id = ?",

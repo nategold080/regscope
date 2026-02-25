@@ -2,14 +2,10 @@
 
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
+import tomllib
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +18,6 @@ DEFAULTS: dict[str, Any] = {
     },
     "data": {
         "data_dir": "~/.regscope/data",
-        "attachments_dir": "~/.regscope/attachments",
     },
     "embedding": {
         "model": "all-MiniLM-L6-v2",
@@ -55,11 +50,9 @@ DEFAULTS: dict[str, Any] = {
         "weight_data_statistics": 0.15,
         "weight_legal_arguments": 0.10,
         "weight_not_form_letter": 0.05,
-        "length_optimal": 2000,
-        "length_max_score": 15,
     },
     "llm": {
-        "enabled": True,
+        "enabled": False,
         "model": "gpt-4o-mini",
     },
     "report": {

@@ -1,4 +1,4 @@
-"""Token bucket rate limiter for API requests."""
+"""Interval-based rate limiter for API requests."""
 
 import logging
 import time
@@ -7,8 +7,8 @@ import threading
 logger = logging.getLogger(__name__)
 
 
-class TokenBucketRateLimiter:
-    """Rate limiter using token bucket algorithm with API header tracking.
+class IntervalRateLimiter:
+    """Rate limiter using minimum-interval enforcement with API header tracking.
 
     Proactively throttles requests based on the X-RateLimit-Remaining header
     from the Regulations.gov API. Does NOT just catch 429s — sleeps before
@@ -63,13 +63,14 @@ class TokenBucketRateLimiter:
         Args:
             headers: Response headers dictionary.
         """
-        remaining = headers.get("X-RateLimit-Remaining")
-        if remaining is not None:
-            try:
-                self.remaining = int(remaining)
-                logger.debug("Rate limit remaining: %d", self.remaining)
-            except ValueError:
-                pass
+        with self._lock:
+            remaining = headers.get("X-RateLimit-Remaining")
+            if remaining is not None:
+                try:
+                    self.remaining = int(remaining)
+                    logger.debug("Rate limit remaining: %d", self.remaining)
+                except ValueError:
+                    pass
 
     def handle_429(self, retry_after: str | None = None) -> None:
         """Handle a 429 Too Many Requests response.
@@ -77,14 +78,21 @@ class TokenBucketRateLimiter:
         Args:
             retry_after: Value of Retry-After header, if present.
         """
-        if retry_after:
-            try:
-                sleep_time = min(float(retry_after), 600.0)  # Cap at 10 minutes
-            except ValueError:
+        with self._lock:
+            if retry_after:
+                try:
+                    sleep_time = min(float(retry_after), 600.0)  # Cap at 10 minutes
+                except ValueError:
+                    sleep_time = 60.0
+            else:
                 sleep_time = 60.0
-        else:
-            sleep_time = 60.0
 
-        logger.warning("Got 429 rate limited. Sleeping %.0fs", sleep_time)
+            logger.warning("Got 429 rate limited. Sleeping %.0fs", sleep_time)
+            self.remaining = 0
+
+        # Sleep outside the lock to avoid blocking other threads
         time.sleep(sleep_time)
-        self.remaining = 0
+
+
+# Backward-compatible alias
+TokenBucketRateLimiter = IntervalRateLimiter

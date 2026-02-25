@@ -21,6 +21,11 @@ def run_dedup(db: sqlite3.Connection, docket_id: str, config: dict[str, Any]) ->
     """
     dedup_cfg = config.get("dedup", {})
 
+    # Clear previous dedup data to ensure idempotency
+    db.execute("UPDATE comments SET dedup_group_id = NULL, semantic_group_id = NULL WHERE docket_id = ?", (docket_id,))
+    db.execute("DELETE FROM dedup_groups WHERE docket_id = ?", (docket_id,))
+    db.commit()
+
     logger.info("Running exact dedup (Tier 1) for %s", docket_id)
     exact_groups = _exact_dedup(db, docket_id)
     logger.info("Found %d exact duplicate groups", exact_groups)
@@ -253,12 +258,21 @@ def _semantic_dedup(db: sqlite3.Connection, docket_id: str, threshold: float = 0
     comment_ids = [r[0] for r in rows]
     embeddings = np.array([np.frombuffer(r[1], dtype=np.float32) for r in rows])
 
+    # Guard against memory explosion for large corpora
+    if len(embeddings) > 50000:
+        logger.warning(
+            "Semantic dedup skipped: %d unique comments exceeds brute-force limit (50K). "
+            "Consider adding faiss for approximate nearest neighbor search.",
+            len(embeddings),
+        )
+        return 0
+
     # Normalize for cosine similarity
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     norms[norms == 0] = 1
     embeddings_normed = embeddings / norms
 
-    # Use batch processing to avoid all-pairs memory explosion
+    # Use batch processing to limit memory per iteration
     visited: set[int] = set()
     group_count = 0
     batch_size = 500

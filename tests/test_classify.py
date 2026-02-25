@@ -1,8 +1,17 @@
-"""Tests for stakeholder classification patterns."""
+"""Tests for stakeholder classification patterns and pipeline integration."""
+
+import sqlite3
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from regscope.pipeline.classify import _classify_org, _compute_substantiveness
+from regscope.pipeline.classify import (
+    _classify_org,
+    _classify_stakeholders,
+    _compute_substantiveness,
+    _score_substantiveness,
+    run_classify,
+)
 
 
 class TestStakeholderClassification:
@@ -48,11 +57,19 @@ class TestStakeholderClassification:
         assert _classify_org("Smith Law Office") == "law_firm"
 
     def test_unknown(self) -> None:
-        """Empty or None orgs should be unknown; capitalized names fall back to industry."""
+        """Empty or None orgs should be unknown; personal names without business indicators too."""
         assert _classify_org("") == "unknown"
         assert _classify_org(None) == "unknown"
-        # Capitalized multi-word names with no pattern match → industry heuristic
-        assert _classify_org("Some Random Name") == "industry"
+        # Personal names without business indicators should be unknown, not industry
+        assert _classify_org("Some Random Name") == "unknown"
+        assert _classify_org("Van Der Berg") == "unknown"
+
+    def test_industry_fallback_with_indicator(self) -> None:
+        """Names with business indicators should fall back to industry."""
+        assert _classify_org("Acme Corp") == "industry"
+        assert _classify_org("XYZ Holdings") == "industry"
+        # Acronyms (2+ uppercase letters) should also match
+        assert _classify_org("Hayden AI") == "industry"
 
     def test_individual_no_org(self) -> None:
         """Empty organization should be classified as unknown (individual logic is in the caller)."""
@@ -147,3 +164,188 @@ class TestSubstantivenessScoring:
         for text in ["", "a", "hello world", "x" * 10000]:
             score = _compute_substantiveness(text, is_form_letter=False, config={})
             assert 0 <= score <= 100
+
+
+def _setup_test_db() -> sqlite3.Connection:
+    """Create an in-memory DB with schema for integration tests."""
+    from regscope.db import SCHEMA_SQL
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(SCHEMA_SQL)
+    conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (3)")
+    conn.commit()
+    return conn
+
+
+def _insert_test_comments(db: sqlite3.Connection, docket_id: str) -> list[str]:
+    """Insert test comments for classification integration tests."""
+    db.execute(
+        "INSERT OR IGNORE INTO dockets (docket_id, title) VALUES (?, ?)",
+        (docket_id, "Test Docket"),
+    )
+    comments = [
+        ("C-001", docket_id, "Sierra Club Foundation", "Jane Doe",
+         "We strongly support the proposed emission standards under 42 U.S.C. § 7411. "
+         "These regulations are essential for public health."),
+        ("C-002", docket_id, "ExxonMobil Corporation", "John Smith",
+         "We oppose this proposed rule. The compliance costs of $50 million per facility "
+         "are excessive. See 85 Fed. Reg. 12345."),
+        ("C-003", docket_id, "", "Anonymous Citizen",
+         "I support this rule."),
+    ]
+    for cid, did, org, name, text in comments:
+        db.execute(
+            """INSERT INTO comments (comment_id, docket_id, organization,
+               submitter_name, full_text, comment_text) VALUES (?, ?, ?, ?, ?, ?)""",
+            (cid, did, org, name, text, text),
+        )
+    db.commit()
+    return [c[0] for c in comments]
+
+
+class TestClassifyStakeholdersDB:
+    """Integration tests for _classify_stakeholders with a real database."""
+
+    def test_stakeholder_classification_writes_to_db(self) -> None:
+        """Stakeholder classification should write correct types to comment_classifications."""
+        db = _setup_test_db()
+        docket_id = "TEST-DOCKET-001"
+        _insert_test_comments(db, docket_id)
+
+        _classify_stakeholders(db, docket_id, {})
+
+        rows = db.execute(
+            "SELECT comment_id, stakeholder_type FROM comment_classifications ORDER BY comment_id"
+        ).fetchall()
+        result = {r[0]: r[1] for r in rows}
+        assert result["C-001"] == "nonprofit"
+        assert result["C-002"] == "industry"
+        assert result["C-003"] == "individual"
+
+    def test_stakeholder_idempotent(self) -> None:
+        """Running stakeholder classification twice should not duplicate rows."""
+        db = _setup_test_db()
+        docket_id = "TEST-DOCKET-001"
+        _insert_test_comments(db, docket_id)
+
+        _classify_stakeholders(db, docket_id, {})
+        _classify_stakeholders(db, docket_id, {})
+
+        count = db.execute("SELECT COUNT(*) FROM comment_classifications").fetchone()[0]
+        assert count == 3
+
+
+class TestSubstantivenessScoringDB:
+    """Integration tests for _score_substantiveness with a real database."""
+
+    def test_scoring_writes_to_db(self) -> None:
+        """Substantiveness scoring should write scores without destroying stakeholder_type."""
+        db = _setup_test_db()
+        docket_id = "TEST-DOCKET-001"
+        _insert_test_comments(db, docket_id)
+
+        # First run stakeholder classification
+        _classify_stakeholders(db, docket_id, {})
+
+        # Then run substantiveness scoring
+        _score_substantiveness(db, docket_id, {})
+
+        rows = db.execute(
+            """SELECT comment_id, stakeholder_type, substantiveness_score
+               FROM comment_classifications ORDER BY comment_id"""
+        ).fetchall()
+        result = {r[0]: (r[1], r[2]) for r in rows}
+
+        # Stakeholder types should be preserved
+        assert result["C-001"][0] == "nonprofit"
+        assert result["C-002"][0] == "industry"
+        assert result["C-003"][0] == "individual"
+
+        # All should have scores
+        for cid in ("C-001", "C-002", "C-003"):
+            assert result[cid][1] is not None
+            assert 0 <= result[cid][1] <= 100
+
+    def test_scoring_handles_missing_dedup_group(self) -> None:
+        """Scoring should not crash when dedup_group_id references a deleted group."""
+        db = _setup_test_db()
+        docket_id = "TEST-DOCKET-001"
+        _insert_test_comments(db, docket_id)
+
+        # Create a dedup group, assign it to C-001, then delete the group
+        cursor = db.execute(
+            """INSERT INTO dedup_groups (docket_id, group_type, group_size, representative_comment_id)
+               VALUES (?, 'exact', 2, 'C-001')""",
+            (docket_id,),
+        )
+        gid = cursor.lastrowid
+        db.execute("UPDATE comments SET dedup_group_id = ? WHERE comment_id = 'C-001'", (gid,))
+        db.commit()
+
+        # Now delete the group row (simulates data inconsistency)
+        db.execute("PRAGMA foreign_keys=OFF")
+        db.execute("DELETE FROM dedup_groups WHERE dedup_group_id = ?", (gid,))
+        db.execute("PRAGMA foreign_keys=ON")
+        db.commit()
+
+        _classify_stakeholders(db, docket_id, {})
+        _score_substantiveness(db, docket_id, {})
+
+        row = db.execute(
+            "SELECT substantiveness_score FROM comment_classifications WHERE comment_id = 'C-001'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] is not None
+
+
+class TestRunClassifyIntegration:
+    """Integration tests for the full run_classify pipeline."""
+
+    @patch("regscope.pipeline.classify._detect_stance")
+    def test_all_stages_preserve_data(self, mock_stance: MagicMock) -> None:
+        """All three sub-stages should preserve each other's data in comment_classifications.
+
+        We mock _detect_stance to avoid loading the transformers model, but simulate
+        its effect by manually inserting stance data before substantiveness scoring.
+        """
+        db = _setup_test_db()
+        docket_id = "TEST-DOCKET-001"
+        _insert_test_comments(db, docket_id)
+
+        def fake_stance(db: sqlite3.Connection, docket_id: str, config: dict) -> None:
+            """Simulate stance detection by inserting stance values."""
+            for cid, stance, conf in [("C-001", "support", 0.85), ("C-002", "oppose", 0.92)]:
+                db.execute(
+                    """INSERT INTO comment_classifications
+                       (comment_id, stance, stance_confidence)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(comment_id) DO UPDATE SET stance = ?, stance_confidence = ?""",
+                    (cid, stance, conf, stance, conf),
+                )
+            db.commit()
+
+        mock_stance.side_effect = fake_stance
+
+        run_classify(db, docket_id, {})
+
+        rows = db.execute(
+            """SELECT comment_id, stakeholder_type, stance, stance_confidence, substantiveness_score
+               FROM comment_classifications ORDER BY comment_id"""
+        ).fetchall()
+        result = {r[0]: {"type": r[1], "stance": r[2], "conf": r[3], "score": r[4]} for r in rows}
+
+        # All three columns should be populated for C-001 and C-002
+        assert result["C-001"]["type"] == "nonprofit"
+        assert result["C-001"]["stance"] == "support"
+        assert result["C-001"]["conf"] == 0.85
+        assert result["C-001"]["score"] is not None
+
+        assert result["C-002"]["type"] == "industry"
+        assert result["C-002"]["stance"] == "oppose"
+        assert result["C-002"]["conf"] == 0.92
+        assert result["C-002"]["score"] is not None
+
+        # C-003 has no stance (short text, wasn't set by fake_stance)
+        assert result["C-003"]["type"] == "individual"
+        assert result["C-003"]["score"] is not None

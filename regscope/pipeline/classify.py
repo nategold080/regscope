@@ -1,6 +1,5 @@
 """Classification pipeline — stakeholder type, stance detection, substantiveness scoring."""
 
-import json
 import logging
 import math
 import re
@@ -79,6 +78,14 @@ STANCE_LABEL_MAP = {
     "provides information without taking a position": "neutral_informational",
 }
 
+# Business indicator words for heuristic org classification
+_BUSINESS_INDICATORS = {
+    "inc", "corp", "llc", "ltd", "group", "association", "company", "co",
+    "foundation", "institute", "council", "board", "commission",
+    "university", "college", "enterprises", "holdings", "partners",
+    "solutions", "services", "technologies",
+}
+
 
 def run_classify(db: sqlite3.Connection, docket_id: str, config: dict[str, Any]) -> None:
     """Run all classification tasks: stakeholder type, stance, substantiveness.
@@ -111,7 +118,7 @@ def _classify_stakeholders(db: sqlite3.Connection, docket_id: str, config: dict[
         config: Application configuration dictionary.
     """
     comments = db.execute(
-        """SELECT comment_id, organization, full_text, submitter_name FROM comments
+        """SELECT comment_id, organization, submitter_name FROM comments
            WHERE docket_id = ?
            AND comment_id NOT IN (
                SELECT comment_id FROM comment_classifications WHERE stakeholder_type IS NOT NULL
@@ -123,7 +130,7 @@ def _classify_stakeholders(db: sqlite3.Connection, docket_id: str, config: dict[
         logger.info("All comments already classified")
         return
 
-    for comment_id, org, full_text, submitter_name in comments:
+    for comment_id, org, submitter_name in comments:
         stakeholder_type = _classify_org(org)
 
         if stakeholder_type == "unknown":
@@ -134,7 +141,7 @@ def _classify_stakeholders(db: sqlite3.Connection, docket_id: str, config: dict[
             # returned "industry", keep that result
 
         db.execute(
-            """INSERT OR REPLACE INTO comment_classifications
+            """INSERT INTO comment_classifications
                (comment_id, stakeholder_type)
                VALUES (?, ?)
                ON CONFLICT(comment_id) DO UPDATE SET stakeholder_type = ?""",
@@ -167,12 +174,13 @@ def _classify_org(org: str | None) -> str:
             if pattern in org_lower:
                 return category
 
-    # Heuristic: if org name is a capitalized multi-word name that doesn't
-    # match any pattern, it's likely a company (e.g., "Arcadis", "Merlin",
-    # "Hayden AI"). Short single-word orgs with no pattern are assumed industry.
-    words = org.strip().split()
-    if len(words) >= 1 and words[0][0].isupper():
-        return "industry"
+    # Heuristic: classify as industry only if the name contains a business
+    # indicator word. Acronyms alone (e.g., NAACP, ACLU, AFL-CIO) are not
+    # reliable industry indicators — many nonprofits and unions use them.
+    org_lower = org.lower()
+    for indicator in _BUSINESS_INDICATORS:
+        if indicator in org_lower.replace(".", "").replace(",", "").split():
+            return "industry"
 
     return "unknown"
 
@@ -224,15 +232,11 @@ def _detect_stance(db: sqlite3.Connection, docket_id: str, config: dict[str, Any
     with Progress() as progress:
         task = progress.add_task("Detecting stance...", total=len(comments))
 
+        from regscope.utils.text import strip_html
+
         for comment_id, full_text in comments:
             try:
-                # Clean HTML entities/tags before classification
-                import html as html_mod
-                text = html_mod.unescape(full_text)
-                text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
-                text = re.sub(r"<[^>]+>", "", text)
-                text = re.sub(r"\s+", " ", text).strip()
-                text = text[:1024]
+                text = strip_html(full_text)[:1024]
 
                 result = classifier(text, STANCE_LABELS, multi_label=False)
 
@@ -278,7 +282,7 @@ def _detect_stance(db: sqlite3.Connection, docket_id: str, config: dict[str, Any
                     stance = "unclear"
 
                 db.execute(
-                    """INSERT OR REPLACE INTO comment_classifications
+                    """INSERT INTO comment_classifications
                        (comment_id, stance, stance_confidence)
                        VALUES (?, ?, ?)
                        ON CONFLICT(comment_id) DO UPDATE SET stance = ?, stance_confidence = ?""",
@@ -297,7 +301,7 @@ def _detect_stance(db: sqlite3.Connection, docket_id: str, config: dict[str, Any
                     ).fetchall()
                     for (member_id,) in members:
                         db.execute(
-                            """INSERT OR REPLACE INTO comment_classifications
+                            """INSERT INTO comment_classifications
                                (comment_id, stance, stance_confidence)
                                VALUES (?, ?, ?)
                                ON CONFLICT(comment_id) DO UPDATE SET stance = ?, stance_confidence = ?""",
@@ -309,7 +313,7 @@ def _detect_stance(db: sqlite3.Connection, docket_id: str, config: dict[str, Any
 
             progress.update(task, advance=1)
 
-            if comment_id and int(progress.tasks[task].completed) % 10 == 0:
+            if comment_id and int(progress.tasks[task].completed or 0) % 10 == 0:
                 db.commit()
 
     db.commit()
@@ -347,10 +351,14 @@ def _score_substantiveness(db: sqlite3.Connection, docket_id: str, config: dict[
 
     for comment_id, full_text, dedup_group_id, group_size, org, stakeholder_type in comments:
         is_form_letter = (group_size or 0) > 1
-        is_representative = dedup_group_id is None or db.execute(
-            "SELECT representative_comment_id FROM dedup_groups WHERE dedup_group_id = ?",
-            (dedup_group_id,),
-        ).fetchone()[0] == comment_id if dedup_group_id else True
+        if dedup_group_id is None:
+            is_representative = True
+        else:
+            row = db.execute(
+                "SELECT representative_comment_id FROM dedup_groups WHERE dedup_group_id = ?",
+                (dedup_group_id,),
+            ).fetchone()
+            is_representative = row is None or row[0] == comment_id
 
         score = _compute_substantiveness(
             full_text,
@@ -362,7 +370,7 @@ def _score_substantiveness(db: sqlite3.Connection, docket_id: str, config: dict[
         )
 
         db.execute(
-            """INSERT OR REPLACE INTO comment_classifications
+            """INSERT INTO comment_classifications
                (comment_id, substantiveness_score)
                VALUES (?, ?)
                ON CONFLICT(comment_id) DO UPDATE SET substantiveness_score = ?""",
@@ -382,21 +390,23 @@ def _compute_substantiveness(
 ) -> int:
     """Compute a substantiveness score (0-100) for a comment.
 
-    Designed so that a comment which is long, from an identified org, contains
-    specific regulatory references, is unique, uses technical vocabulary, and
-    includes data/legal arguments can realistically reach 75-85.
+    Each component produces a 0-100 subscore. The final score is the
+    weighted sum of all subscores, using weights from config. If no config
+    weights are provided, uses defaults matching config.toml.example.
 
-    Scoring components (additive, theoretical max ~100):
-    - Length:                0-20 points
-    - Organizational affil: 0-10 points
-    - Unique/representative: 0-8 points
-    - Section references:   0-12 points
-    - Citations:            0-12 points
-    - Technical vocabulary:  0-12 points
-    - Data/statistics:      0-10 points
-    - Legal arguments:      0-10 points
-    - Structural quality:   0-6 points
-    - Form letter penalty:  -20 points
+    Components:
+    - length: Text length (logarithmic scale)
+    - citations: URLs, DOIs, legal citations
+    - section_references: CFR/Fed Reg section references
+    - technical_vocab: Distinct technical terms present
+    - data_statistics: Percentages, dollar amounts, tables/figures
+    - legal_arguments: Legal framework references
+    - not_form_letter: Bonus for unique, non-form-letter comments
+
+    Additional adjustments (not weighted):
+    - Organizational affiliation bonus (0-10 points on final score)
+    - Structural quality bonus (0-6 points on final score)
+    - Form letter penalty (-20 points on final score)
 
     Args:
         text: Full comment text.
@@ -404,7 +414,7 @@ def _compute_substantiveness(
         has_org: Whether the commenter has an organizational affiliation.
         stakeholder_type: The classified stakeholder type.
         is_representative: Whether this is a unique comment or dedup group representative.
-        config: Optional weight overrides.
+        config: Optional config dict with weight overrides.
 
     Returns:
         Integer score 0-100.
@@ -412,26 +422,24 @@ def _compute_substantiveness(
     if config is None:
         config = {}
 
-    score = 0.0
+    # Load weights from config, with defaults
+    w_length = config.get("weight_length", 0.15)
+    w_citations = config.get("weight_citations", 0.20)
+    w_sections = config.get("weight_section_references", 0.20)
+    w_tech = config.get("weight_technical_vocab", 0.15)
+    w_data = config.get("weight_data_statistics", 0.15)
+    w_legal = config.get("weight_legal_arguments", 0.10)
+    w_form = config.get("weight_not_form_letter", 0.05)
 
-    # --- Length (0-20 points, logarithmic) ---
-    # 200 chars → ~6, 500 → ~10, 1000 → ~13, 2000 → ~16, 5000 → ~19, 10000+ → 20
+    # --- Length subscore (0-100) ---
+    # 200 chars → ~30, 500 → ~50, 1000 → ~65, 2000 → ~80, 5000 → ~95, 10000+ → 100
     text_len = len(text)
     if text_len > 0:
-        length_pts = min(20.0, math.log(1 + text_len / 100.0) * 5.2)
-        score += length_pts
+        length_sub = min(100.0, math.log(1 + text_len / 100.0) * 26.0)
+    else:
+        length_sub = 0.0
 
-    # --- Organizational affiliation (0-10 points) ---
-    if has_org:
-        score += 5.0
-        if stakeholder_type in ("trade_association", "nonprofit", "government", "academic", "law_firm"):
-            score += 5.0
-
-    # --- Unique / representative comment (0-8 points) ---
-    if is_representative and not is_form_letter:
-        score += 8.0
-
-    # --- Section references (0-12 points) ---
+    # --- Section references subscore (0-100) ---
     section_patterns = [
         r"\b\d+\s*C\.?F\.?R\.?\s*(?:Part|§|Section)?\s*\d+",
         r"\b\d+\s*Fed\.?\s*Reg\.?\s*\d+",
@@ -443,9 +451,9 @@ def _compute_substantiveness(
         r"\bDocket\s+(?:No\.?\s*)?[A-Z]",
     ]
     section_count = sum(len(re.findall(p, text, re.IGNORECASE)) for p in section_patterns)
-    score += min(section_count * 4.0, 12.0)
+    sections_sub = min(section_count * 33.0, 100.0)
 
-    # --- Citations (0-12 points) ---
+    # --- Citations subscore (0-100) ---
     citation_patterns = [
         r"https?://\S+",
         r"\bdoi:\s*\S+",
@@ -458,10 +466,9 @@ def _compute_substantiveness(
         r"\baccording to\b",
     ]
     citation_count = sum(len(re.findall(p, text, re.IGNORECASE)) for p in citation_patterns)
-    score += min(citation_count * 3.0, 12.0)
+    citations_sub = min(citation_count * 25.0, 100.0)
 
-    # --- Technical vocabulary (0-12 points) ---
-    # Count distinct term categories that appear (not raw count)
+    # --- Technical vocabulary subscore (0-100) ---
     technical_terms = [
         r"\bemission[s]?\b", r"\bpollutant[s]?\b", r"\bstandard[s]?\b",
         r"\bcompliance\b", r"\bregulat\w+\b", r"\bstatut\w+\b",
@@ -474,11 +481,10 @@ def _compute_substantiveness(
         r"\bartificial intelligence\b", r"\bsafety\b", r"\bsecurity\b",
         r"\bpropos\w+\b", r"\brequirement[s]?\b", r"\bimpact\b",
     ]
-    # Count distinct terms present (not total occurrences)
     tech_present = sum(1 for t in technical_terms if re.search(t, text, re.IGNORECASE))
-    score += min(tech_present * 1.2, 12.0)
+    tech_sub = min(tech_present * 10.0, 100.0)
 
-    # --- Data and statistics (0-10 points) ---
+    # --- Data and statistics subscore (0-100) ---
     data_patterns = [
         r"\b\d+(?:\.\d+)?%",
         r"\$\s*[\d,.]+",
@@ -490,9 +496,9 @@ def _compute_substantiveness(
         r"\bappendix\b",
     ]
     data_count = sum(len(re.findall(p, text, re.IGNORECASE)) for p in data_patterns)
-    score += min(data_count * 2.5, 10.0)
+    data_sub = min(data_count * 25.0, 100.0)
 
-    # --- Legal arguments (0-10 points) ---
+    # --- Legal arguments subscore (0-100) ---
     legal_patterns = [
         r"\bArbitrary and Capricious\b",
         r"\bAdministrative Procedure Act\b",
@@ -508,13 +514,31 @@ def _compute_substantiveness(
         r"\bendangered species\b",
     ]
     legal_count = sum(len(re.findall(p, text, re.IGNORECASE)) for p in legal_patterns)
-    score += min(legal_count * 3.0, 10.0)
+    legal_sub = min(legal_count * 30.0, 100.0)
 
-    # --- Structural quality (0-6 points) ---
-    # Numbered lists / Q&A format — hallmark of substantive organizational comments
+    # --- Not-form-letter subscore (0 or 100) ---
+    form_sub = 100.0 if (is_representative and not is_form_letter) else 0.0
+
+    # Weighted sum of subscores
+    score = (
+        w_length * length_sub
+        + w_citations * citations_sub
+        + w_sections * sections_sub
+        + w_tech * tech_sub
+        + w_data * data_sub
+        + w_legal * legal_sub
+        + w_form * form_sub
+    )
+
+    # --- Organizational affiliation bonus (additive, not weighted) ---
+    if has_org:
+        score += 5.0
+        if stakeholder_type in ("trade_association", "nonprofit", "government", "academic", "law_firm"):
+            score += 5.0
+
+    # --- Structural quality bonus (additive, not weighted) ---
     numbered = len(re.findall(r"(?:^|\n)\s*(?:\d+[\.\):]|[a-z][\.\)]|[-•])\s+\w", text))
     score += min(numbered * 1.0, 3.0)
-    # Paragraph structure (multiple substantial paragraphs)
     paragraphs = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 80]
     score += min(len(paragraphs) * 0.5, 3.0)
 

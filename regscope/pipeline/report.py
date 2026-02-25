@@ -3,7 +3,7 @@
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,8 +53,8 @@ def run_report(db: sqlite3.Connection, docket_id: str, config: dict[str, Any], o
     report = "\n\n---\n\n".join(sections)
     report = (
         f"# RegScope Analysis Report: {docket_id}\n\n"
-        f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n"
-        f"*This report was generated automatically by [RegScope](https://github.com/regscope), "
+        f"*Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}*\n\n"
+        f"*This report was generated automatically by RegScope, "
         f"a tool for structured analysis of federal rulemaking public comments.*\n\n"
         f"{report}\n"
     )
@@ -142,7 +142,7 @@ def _build_json_export(db: sqlite3.Connection, docket_id: str, df: "pd.DataFrame
 
     return {
         "docket_id": docket_id,
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": {
             "total_comments": len(df),
             "unique_comments": int(df["dedup_group_id"].isna().sum() + df.drop_duplicates("dedup_group_id")["dedup_group_id"].notna().sum()),
@@ -334,7 +334,7 @@ def _generate_llm_topic_labels(
     import os
 
     llm_cfg = config.get("llm", {})
-    if not llm_cfg.get("enabled", True):
+    if not llm_cfg.get("enabled", False):
         logger.debug("LLM topic labels disabled in config")
         return {}
 
@@ -668,7 +668,11 @@ def _substantive_highlights(db: sqlite3.Connection, docket_id: str, report_cfg: 
     ])
 
     for i, (cid, name, org, text, score, stype, stance) in enumerate(top_comments, 1):
-        submitter = name or "Anonymous"
+        submitter = name.strip() if name else ""
+        # Deduplicate "Anonymous Anonymous" from API first/last name fields
+        if submitter.lower() == "anonymous anonymous":
+            submitter = "Anonymous"
+        submitter = submitter or "Anonymous"
         if org:
             submitter = f"{submitter} ({org})"
 
@@ -708,13 +712,6 @@ def _data_quality_notes(db: sqlite3.Connection, docket_id: str) -> str:
         (docket_id,),
     ).fetchone()[0]
 
-    failed_extractions = db.execute(
-        """SELECT COUNT(*) FROM attachments a
-           JOIN comments c ON a.comment_id = c.comment_id
-           WHERE c.docket_id = ? AND a.extracted_text IS NULL AND a.file_url != ''""",
-        (docket_id,),
-    ).fetchone()[0]
-
     # Count comments where the body was a stub ("see attached") but
     # full_text was populated from attachment extraction
     pdf_only = db.execute(
@@ -733,6 +730,8 @@ def _data_quality_notes(db: sqlite3.Connection, docket_id: str) -> str:
            WHERE c.docket_id = ? AND a.extracted_text IS NOT NULL AND a.extracted_text != ''""",
         (docket_id,),
     ).fetchone()[0]
+
+    failed_extractions = total_attachments - successfully_extracted
 
     lines = [
         "## 7. Data Quality Notes",

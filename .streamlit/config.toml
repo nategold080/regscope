@@ -1,0 +1,13 @@
+[server]
+headless = true
+maxUploadSize = 5
+enableCORS = false
+enableXsrfProtection = false
+
+[theme]
+base = "dark"
+primaryColor = "#0984E3"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1B2A4A"
+textColor = "#E2E8F0"
+font = "sans serif"

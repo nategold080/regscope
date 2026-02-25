@@ -1,9 +1,7 @@
 """Topic modeling pipeline — BERTopic clustering of comment embeddings."""
 
-import html
 import json
 import logging
-import re
 import sqlite3
 from typing import Any
 
@@ -208,7 +206,11 @@ def run_topics(db: sqlite3.Connection, docket_id: str, config: dict[str, Any]) -
         if db_topic_id is None:
             continue
 
-        prob = float(probs[i]) if probs is not None and i < len(probs) else 0.0
+        if probs is not None and i < len(probs):
+            p = probs[i]
+            prob = float(p.max()) if hasattr(p, 'max') and p.ndim > 0 else float(p)
+        else:
+            prob = 0.0
 
         db.execute(
             """INSERT OR REPLACE INTO comment_topics
@@ -235,6 +237,12 @@ def _propagate_topics_to_groups(db: sqlite3.Connection, docket_id: str) -> None:
 
     For each dedup group, the representative's topic is assigned to every
     member that doesn't already have one.
+
+    Edge case: if the representative comment is an outlier (assigned to
+    BERTopic topic -1, meaning "no topic"), check if any other member of
+    the group already has a valid topic assignment. If so, use that member's
+    topic for the entire group instead. If all members are outliers, leave
+    them as outliers.
     """
     groups = db.execute(
         """SELECT dg.dedup_group_id, dg.representative_comment_id
@@ -242,6 +250,15 @@ def _propagate_topics_to_groups(db: sqlite3.Connection, docket_id: str) -> None:
            WHERE dg.docket_id = ?""",
         (docket_id,),
     ).fetchall()
+
+    # Build a lookup of which topic_ids correspond to the outlier topic (bertopic_id = -1)
+    outlier_topic_ids = set()
+    outlier_rows = db.execute(
+        "SELECT topic_id FROM topics WHERE docket_id = ? AND bertopic_id = -1",
+        (docket_id,),
+    ).fetchall()
+    for (tid,) in outlier_rows:
+        outlier_topic_ids.add(tid)
 
     propagated = 0
     for group_id, rep_id in groups:
@@ -255,6 +272,29 @@ def _propagate_topics_to_groups(db: sqlite3.Connection, docket_id: str) -> None:
             continue
 
         topic_id, relevance = rep_topic
+
+        # If the representative is an outlier, try to find a group member with
+        # a valid (non-outlier) topic assignment to use instead
+        if topic_id in outlier_topic_ids:
+            members_all = db.execute(
+                "SELECT comment_id FROM comments WHERE dedup_group_id = ? AND comment_id != ?",
+                (group_id, rep_id),
+            ).fetchall()
+
+            fallback_found = False
+            for (member_id,) in members_all:
+                member_topic = db.execute(
+                    "SELECT topic_id, relevance_score FROM comment_topics WHERE comment_id = ?",
+                    (member_id,),
+                ).fetchone()
+                if member_topic and member_topic[0] not in outlier_topic_ids:
+                    topic_id, relevance = member_topic
+                    fallback_found = True
+                    break
+
+            if not fallback_found:
+                # All members are outliers — propagate the outlier assignment
+                pass
 
         # Get all other members in this group
         members = db.execute(
@@ -276,9 +316,13 @@ def _propagate_topics_to_groups(db: sqlite3.Connection, docket_id: str) -> None:
 
 
 def _clean_for_topics(text: str) -> str:
-    """Clean HTML tags/entities from text before topic modeling."""
-    text = html.unescape(text)
-    text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    """Clean HTML tags/entities and normalize text before topic modeling."""
+    import re as _re
+
+    from regscope.utils.text import strip_html
+
+    text = strip_html(text)
+    # Replace hyphens between words with spaces so the vectorizer doesn't
+    # fuse tokens (e.g., "ADS-equipped" → "ADS equipped", not "adsequipped").
+    text = _re.sub(r"(?<=\w)-(?=\w)", " ", text)
     return text
