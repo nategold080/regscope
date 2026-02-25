@@ -294,10 +294,9 @@ def aggregate_campaigns(dedup_groups, comments_df):
 # ── Page layout ───────────────────────────────────────────────────────────
 
 def main():
-    favicon = Path(__file__).resolve().parent.parent / ".streamlit" / "favicon.png"
     st.set_page_config(
         page_title="RegScope — Federal Comment Analyzer",
-        page_icon=str(favicon) if favicon.exists() else ":memo:",
+        page_icon="\U0001f4cb",
         layout="wide",
         initial_sidebar_state="collapsed",
     )
