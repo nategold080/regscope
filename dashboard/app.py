@@ -116,6 +116,10 @@ def load_docket_data(db_path: str):
     """Load all relevant data from a single docket database."""
     conn = sqlite3.connect(db_path)
 
+    # Check if llm_label column exists in topics table
+    topic_cols = {row[1] for row in conn.execute("PRAGMA table_info(topics)").fetchall()}
+    has_llm_label = "llm_label" in topic_cols
+
     comments = pd.read_sql_query("""
         SELECT c.comment_id, c.submitter_name, c.organization, c.posted_date,
                c.dedup_group_id, c.semantic_group_id,
@@ -125,11 +129,19 @@ def load_docket_data(db_path: str):
         LEFT JOIN comment_classifications cc ON c.comment_id = cc.comment_id
     """, conn)
 
-    topics = pd.read_sql_query("""
-        SELECT topic_id, label, keywords, topic_size, llm_label
-        FROM topics
-        ORDER BY topic_size DESC
-    """, conn)
+    if has_llm_label:
+        topics = pd.read_sql_query("""
+            SELECT topic_id, bertopic_id, label, keywords, topic_size, llm_label
+            FROM topics
+            ORDER BY topic_size DESC
+        """, conn)
+    else:
+        topics = pd.read_sql_query("""
+            SELECT topic_id, bertopic_id, label, keywords, topic_size
+            FROM topics
+            ORDER BY topic_size DESC
+        """, conn)
+        topics["llm_label"] = None
 
     dedup_groups = pd.read_sql_query("""
         SELECT dedup_group_id, group_type, group_size, template_text
@@ -137,12 +149,21 @@ def load_docket_data(db_path: str):
         ORDER BY group_size DESC
     """, conn)
 
-    comment_topics = pd.read_sql_query("""
-        SELECT ct.comment_id, ct.topic_id, ct.relevance_score,
-               t.label, t.llm_label, t.topic_size
-        FROM comment_topics ct
-        JOIN topics t ON ct.topic_id = t.topic_id
-    """, conn)
+    if has_llm_label:
+        comment_topics = pd.read_sql_query("""
+            SELECT ct.comment_id, ct.topic_id, ct.relevance_score,
+                   t.label, t.llm_label, t.topic_size
+            FROM comment_topics ct
+            JOIN topics t ON ct.topic_id = t.topic_id
+        """, conn)
+    else:
+        comment_topics = pd.read_sql_query("""
+            SELECT ct.comment_id, ct.topic_id, ct.relevance_score,
+                   t.label, t.topic_size
+            FROM comment_topics ct
+            JOIN topics t ON ct.topic_id = t.topic_id
+        """, conn)
+        comment_topics["llm_label"] = None
 
     conn.close()
 
@@ -190,8 +211,8 @@ def main():
 
     /* KPI cards */
     [data-testid="stMetric"] {
-        background: #F8FAFC;
-        border: 1px solid #E2E8F0;
+        background: #1B2A4A;
+        border: 1px solid #2D3F5E;
         border-radius: 10px;
         padding: 16px 20px;
     }
@@ -199,7 +220,7 @@ def main():
         font-family: 'Inter', sans-serif;
         font-size: 0.8rem !important;
         font-weight: 500;
-        color: #64748B !important;
+        color: #94A3B8 !important;
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
@@ -207,7 +228,7 @@ def main():
         font-family: 'Inter', sans-serif;
         font-size: 1.8rem !important;
         font-weight: 700;
-        color: #1B2A4A !important;
+        color: #FFFFFF !important;
     }
 
     /* Section headers */
@@ -424,18 +445,35 @@ def main():
     cross = comments[comments["stance"].notna() & comments["stakeholder_type"].notna()]
     if len(cross) > 10:
         section_header("Stance by Stakeholder Type")
+        st.caption("Showing stance as a percentage within each stakeholder type — hover for counts")
 
         pivot = cross.groupby(["stakeholder_type", "stance"]).size().reset_index(name="count")
+        # Calculate percentage within each stakeholder type
+        type_totals = pivot.groupby("stakeholder_type")["count"].transform("sum")
+        pivot["pct"] = (pivot["count"] / type_totals * 100).round(1)
         pivot["stance_label"] = pivot["stance"].apply(fmt_stance)
         pivot["type_label"] = pivot["stakeholder_type"].apply(fmt_stakeholder)
+        # Add total count per stakeholder type for the x-axis label
+        totals_map = pivot.groupby("stakeholder_type")["count"].sum().to_dict()
+        pivot["type_with_n"] = pivot["stakeholder_type"].apply(
+            lambda t: f"{fmt_stakeholder(t)} (n={totals_map.get(t, 0):,})"
+        )
+        pivot["hover"] = pivot.apply(
+            lambda r: f"{r['stance_label']}: {r['count']} comments ({r['pct']}%)", axis=1
+        )
 
         fig = px.bar(
-            pivot, x="type_label", y="count", color="stance_label",
+            pivot, x="type_with_n", y="pct", color="stance_label",
             color_discrete_map={fmt_stance(s): STANCE_COLORS.get(s, "#DFE6E9") for s in STANCE_ORDER},
-            labels={"type_label": "Stakeholder Type", "count": "Comments", "stance_label": "Stance"},
+            labels={"type_with_n": "Stakeholder Type", "pct": "Percentage", "stance_label": "Stance"},
             barmode="stack",
+            custom_data=["count", "stance_label"],
         )
-        plotly_dark_layout(fig, height=400, xaxis_tickangle=-30)
+        fig.update_traces(
+            hovertemplate="%{customdata[1]}: %{customdata[0]} comments (%{y:.1f}%)<extra></extra>",
+        )
+        plotly_dark_layout(fig, height=400, xaxis_tickangle=-30,
+                          yaxis_title="% of Comments", yaxis_range=[0, 105])
         st.plotly_chart(fig, use_container_width=True)
 
     # ── Topic Analysis ─────────────────────────────────────────────────
@@ -444,16 +482,27 @@ def main():
 
         topic_display = topics.copy()
         topic_display["display_label"] = topic_display.apply(
-            lambda r: r["llm_label"] if pd.notna(r["llm_label"]) and r["llm_label"]
+            lambda r: r["llm_label"] if pd.notna(r.get("llm_label")) and r.get("llm_label")
             else r["label"] if pd.notna(r["label"]) else f"Topic {r['topic_id']}",
             axis=1,
         )
+
+        # Filter out BERTopic outlier/noise cluster (topic -1, typically labeled "Miscellaneous / Outliers")
+        is_outlier = topic_display["display_label"].str.lower().str.contains("miscellaneous|outlier", na=False)
+        if "bertopic_id" in topic_display.columns:
+            is_outlier = is_outlier | (topic_display["bertopic_id"] == -1)
+        outlier_count = topic_display.loc[is_outlier, "topic_size"].sum()
+        topic_filtered = topic_display[~is_outlier].copy()
+
         # Truncate for display
-        topic_display["display_label"] = topic_display["display_label"].apply(
+        topic_filtered["display_label"] = topic_filtered["display_label"].apply(
             lambda t: t[:70] + "..." if isinstance(t, str) and len(t) > 70 else t
         )
 
-        top_n = topic_display.head(15)
+        top_n = topic_filtered.head(15)
+        if outlier_count > 0:
+            st.caption(f"{outlier_count:,} comments fell outside identified topic clusters and are excluded from this chart")
+
         fig = go.Figure(go.Bar(
             y=top_n["display_label"],
             x=top_n["topic_size"],
@@ -472,60 +521,117 @@ def main():
     sub_scores = comments[comments["substantiveness_score"].notna()]["substantiveness_score"]
     if not sub_scores.empty:
         section_header("Substantiveness Score Distribution")
-        st.caption("0-19: Form letters | 20-39: Low substance | 40-59: Moderate | 60-79: High | 80-100: Highly substantive")
+        st.caption(
+            "Each comment is scored 0–100 based on length, specificity, citations, "
+            "technical language, and uniqueness. Form letters score low; detailed "
+            "legal or technical arguments score high."
+        )
 
-        fig = go.Figure(go.Histogram(
-            x=sub_scores, nbinsx=20,
-            marker_color=ACCENT_BLUE,
+        # Bin into meaningful categories
+        bins = [
+            ("Form Letters\n(0–19)", 0, 19, "#FF7675"),
+            ("Low\n(20–39)", 20, 39, "#FDCB6E"),
+            ("Moderate\n(40–59)", 40, 59, "#74B9FF"),
+            ("High\n(60–79)", 60, 79, "#0984E3"),
+            ("Highly Substantive\n(80–100)", 80, 100, "#00B894"),
+        ]
+        bin_labels, bin_counts, bin_colors = [], [], []
+        for label, lo, hi, color in bins:
+            count = int(((sub_scores >= lo) & (sub_scores <= hi)).sum())
+            bin_labels.append(label)
+            bin_counts.append(count)
+            bin_colors.append(color)
+
+        fig = go.Figure(go.Bar(
+            x=bin_labels, y=bin_counts,
+            marker_color=bin_colors,
+            text=[f"{c:,}" for c in bin_counts],
+            textposition="outside",
         ))
-        plotly_dark_layout(fig, height=320, showlegend=False,
-                          xaxis_title="Substantiveness Score",
-                          yaxis_title="Number of Comments")
+        plotly_dark_layout(fig, height=350, showlegend=False,
+                          xaxis_title="", yaxis_title="Number of Comments")
         st.plotly_chart(fig, use_container_width=True)
 
     # ── Duplicate / Form Letter Analysis ───────────────────────────────
     if not dedup_groups.empty:
         section_header("Duplicate & Form Letter Analysis")
+        st.caption(
+            "Comments are grouped by similarity: exact duplicates share identical text, "
+            "near-duplicates are form letters with minor edits (name changes, typos), "
+            "and semantic matches convey the same argument in different words."
+        )
 
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns([1, 2])
 
         with col1:
             # By type
             type_counts = dedup_groups["group_type"].value_counts()
-            type_labels = {"exact": "Exact Duplicates", "near": "Near Duplicates", "semantic": "Semantic Matches"}
+            type_labels = {"exact": "Exact\nDuplicates", "near": "Near\nDuplicates", "semantic": "Semantic\nMatches"}
             fig = go.Figure(go.Bar(
                 x=[type_labels.get(t, t) for t in type_counts.index],
                 y=type_counts.values,
                 marker_color=[PALETTE[0], PALETTE[1], PALETTE[2]][:len(type_counts)],
-                text=type_counts.values,
+                text=[f"{v:,}" for v in type_counts.values],
                 textposition="outside",
             ))
-            plotly_dark_layout(fig, height=300, showlegend=False,
-                              yaxis_title="Number of Groups")
+            plotly_dark_layout(fig, height=320, showlegend=False,
+                              yaxis_title="Number of Groups",
+                              margin=dict(l=40, r=20, t=50, b=40))
             st.plotly_chart(fig, use_container_width=True)
 
+            # Summary stats
+            total_duped = dedup_groups[dedup_groups["group_size"] > 1]["group_size"].sum()
+            total_groups = len(dedup_groups[dedup_groups["group_size"] > 1])
+            st.markdown(
+                f"**{total_groups}** campaigns produced **{total_duped:,}** duplicate comments"
+            )
+
         with col2:
-            # Top campaigns
+            st.markdown("**Top Form Letter Campaigns**")
             top_campaigns = dedup_groups[dedup_groups["group_size"] > 1].head(10)
-            if not top_campaigns.empty:
-                campaign_labels = top_campaigns.apply(
-                    lambda r: (r["template_text"][:50] + "..." if pd.notna(r["template_text"]) and len(str(r["template_text"])) > 50
-                               else str(r["template_text"])[:50] if pd.notna(r["template_text"])
-                               else f"Group {r['dedup_group_id']}"),
-                    axis=1,
-                )
-                fig = go.Figure(go.Bar(
-                    y=campaign_labels,
-                    x=top_campaigns["group_size"],
-                    orientation="h",
-                    marker_color=PALETTE[1],
-                    text=top_campaigns["group_size"],
-                    textposition="outside",
-                ))
-                plotly_dark_layout(fig, height=350, showlegend=False,
-                                  xaxis_title="Copies Found",
-                                  yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig, use_container_width=True)
+            type_color = {"exact": "#0984E3", "near": "#6C5CE7", "semantic": "#00B894"}
+            type_emoji = {"exact": "Exact", "near": "Near-duplicate", "semantic": "Semantic"}
+
+            for _, row in top_campaigns.iterrows():
+                group_type = row["group_type"]
+                group_size = row["group_size"]
+                template = str(row["template_text"]) if pd.notna(row["template_text"]) else None
+                group_id = row["dedup_group_id"]
+
+                # Build header
+                badge = type_emoji.get(group_type, group_type)
+                if template:
+                    # Clean HTML tags for preview
+                    preview = template.replace("<br/>", " ").replace("<br>", " ")
+                    preview = preview.replace("&rsquo;", "'").replace("&amp;", "&")
+                    preview = preview[:80] + "..." if len(preview) > 80 else preview
+                else:
+                    preview = f"Group {group_id}"
+
+                header = f"**{group_size:,} copies** — {badge} — {preview}"
+                with st.expander(header, expanded=False):
+                    col_a, col_b = st.columns([1, 4])
+                    with col_a:
+                        st.metric("Copies", f"{group_size:,}")
+                        st.markdown(
+                            f"<span style='background:{type_color.get(group_type, '#555')};color:white;"
+                            f"padding:2px 8px;border-radius:4px;font-size:0.75rem'>{badge}</span>",
+                            unsafe_allow_html=True,
+                        )
+                    with col_b:
+                        if template:
+                            # Clean up HTML for display
+                            clean = template.replace("<br/>", "\n").replace("<br>", "\n")
+                            clean = clean.replace("&rsquo;", "'").replace("&amp;", "&")
+                            clean = clean.replace("&nbsp;", " ")
+                            st.markdown(
+                                f"<div style='background:#1B2A4A;padding:12px;border-radius:8px;"
+                                f"font-size:0.85rem;line-height:1.5;max-height:200px;overflow-y:auto'>"
+                                f"{clean[:500]}{'...' if len(clean) > 500 else ''}</div>",
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.write("No template text available for this group")
 
     # ── Comment Explorer ───────────────────────────────────────────────
     section_header("Comment Explorer")
