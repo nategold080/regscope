@@ -86,6 +86,8 @@ def clean_html(text):
     t = t.replace("&rsquo;", "\u2019").replace("&amp;", "&")
     t = t.replace("&nbsp;", " ").replace("&ldquo;", "\u201c").replace("&rdquo;", "\u201d")
     t = re.sub(r"<[^>]+>", "", t)
+    # Remove standalone page numbers (1-3 digits alone on a line, from PDF extraction)
+    t = re.sub(r"\n\s*\d{1,3}\s*\n", "\n", t)
     return t.strip()
 
 
@@ -776,8 +778,10 @@ def main():
                 hole=0.5,
             )
             plotly_dark_layout(fig2, height=320, showlegend=True,
-                              margin=dict(l=10, r=10, t=40, b=10))
-            fig2.update_traces(textposition="inside", textinfo="percent+label", textfont_size=12)
+                              legend=dict(font=dict(size=14), orientation="h",
+                                          yanchor="bottom", y=-0.15, xanchor="center", x=0.5),
+                              margin=dict(l=10, r=10, t=40, b=50))
+            fig2.update_traces(textposition="inside", textinfo="percent", textfont_size=13)
             st.plotly_chart(fig2, use_container_width=True)
 
         total_groups = len(multi_groups)
@@ -837,10 +841,10 @@ def main():
                     if template:
                         clean = clean_html(template)
                         st.markdown(
-                            f"<div style='background:#1B2A4A;padding:12px;border-radius:8px;"
-                            f"font-size:0.85rem;line-height:1.5;max-height:200px;overflow-y:auto;"
+                            f"<div style='background:#1B2A4A;padding:14px;border-radius:8px;"
+                            f"font-size:0.85rem;line-height:1.6;max-height:400px;overflow-y:auto;"
                             f"white-space:pre-wrap'>"
-                            f"{clean[:600]}{'...' if len(clean) > 600 else ''}</div>",
+                            f"{clean[:3000]}{'...' if len(clean) > 3000 else ''}</div>",
                             unsafe_allow_html=True,
                         )
 
@@ -855,8 +859,7 @@ def main():
     # ── Top Substantive Comments ───────────────────────────────────────
     scored_comments = comments[comments["substantiveness_score"].notna()].copy()
     if not scored_comments.empty:
-        scored_comments["percentile"] = scored_comments["substantiveness_score"].rank(pct=True) * 100
-        top_sub = scored_comments.nlargest(5, "substantiveness_score")
+        top_sub = scored_comments.nlargest(10, "substantiveness_score")
 
     if not scored_comments.empty and top_sub.iloc[0]["substantiveness_score"] >= 40:
         section_header("Most Substantive Comments")
@@ -866,9 +869,15 @@ def main():
             "Click to read the full comment."
         )
 
-        for _, row in top_sub.iterrows():
+        # Progressive disclosure — show 3 initially
+        sub_show_key = f"show_substantive_{selected_docket}"
+        if sub_show_key not in st.session_state:
+            st.session_state[sub_show_key] = 3
+
+        visible_sub = min(st.session_state[sub_show_key], len(top_sub))
+
+        for i, (_, row) in enumerate(top_sub.head(visible_sub).iterrows()):
             score = int(row["substantiveness_score"])
-            pctile = int(row["percentile"])
             org = row["organization"] if pd.notna(row["organization"]) and row["organization"] else None
             name = row["submitter_name"] if pd.notna(row["submitter_name"]) else None
             text = row["full_text"] if pd.notna(row.get("full_text")) else row.get("comment_text", "")
@@ -893,10 +902,9 @@ def main():
             if text_len > 1000:
                 tags.append(f"{text_len:,} chars")
 
-            pctile_label = f"Top {100 - pctile:.0f}%" if pctile > 50 else f"{pctile:.0f}th percentile"
-            header = f"{pctile_label} \u2014 {attribution}"
+            header = f"#{i + 1} \u2014 {attribution}"
 
-            with st.expander(header, expanded=False):
+            with st.expander(header, expanded=(i == 0)):
                 tag_str = " &bull; ".join(tags)
                 if tag_str:
                     st.markdown(
@@ -913,6 +921,12 @@ def main():
                         f"white-space:pre-wrap'>{clean[:3000]}{'...' if len(clean) > 3000 else ''}</div>",
                         unsafe_allow_html=True,
                     )
+
+        if visible_sub < len(top_sub):
+            remaining_sub = len(top_sub) - visible_sub
+            if st.button(f"Show more comments ({remaining_sub} remaining)", key=f"more_sub_{selected_docket}"):
+                st.session_state[sub_show_key] += 3
+                st.rerun()
 
     # ── Comment Explorer ───────────────────────────────────────────────
     section_header("Comment Explorer")
