@@ -157,9 +157,10 @@ def load_docket_data(db_path: str):
 # ── Page layout ───────────────────────────────────────────────────────────
 
 def main():
+    favicon = Path(__file__).resolve().parent.parent / ".streamlit" / "favicon.png"
     st.set_page_config(
         page_title="RegScope — Federal Comment Analyzer",
-        page_icon=":memo:",
+        page_icon=str(favicon) if favicon.exists() else ":memo:",
         layout="wide",
         initial_sidebar_state="collapsed",
     )
@@ -637,6 +638,10 @@ from Regulations.gov:
         "RegScope &bull; Federal Rulemaking Comment Analyzer &bull; "
         "Data sourced from Regulations.gov API &bull; "
         "Zero-cost NLP pipeline: embeddings &rarr; dedup &rarr; classify &rarr; topic model"
+        "<br>"
+        "Built by <strong>Nathan Goldberg</strong> &nbsp;|&nbsp; "
+        "<a href='mailto:nathanmauricegoldberg@gmail.com' style='color: #0984E3; text-decoration: none;'>nathanmauricegoldberg@gmail.com</a> &nbsp;|&nbsp; "
+        "<a href='https://www.linkedin.com/in/nathan-goldberg-62a44522a' target='_blank' style='color: #0984E3; text-decoration: none;'>LinkedIn</a>"
         "</div>",
         unsafe_allow_html=True,
     )
